@@ -25,14 +25,14 @@
 - [x] 整理功能清单：已基于 OEM.ini 全部开关项 + ini 用户配置 + 安装包资源生成 `docs/feature-list.md`（8 大类，含裁剪建议）
 - [ ] Ghidra 反编译 vpnd.exe：`/vpntunnel` 请求/响应格式、认证字段、cookie 处理
 - [ ] Ghidra 反编译 vl3vpn.dll：隧道包封装格式、keepalive 报文、MTU/TAF 结构
-- [ ] Wireshark 抓包（TCP/UDP/WG 各一次）印证静态分析结果
+- [x] pktmon 抓包：TCP 隧道心跳实测（~200ms）；UDP/WG 模式未覆盖（原版当前未启用）
 
 ### 技术选型：Rust 核心 + Tauri 2 UI
 
-- [ ] Rust 核心 crate：协议客户端、TLS（rustls，替代旧 OpenSSL 1.0 —— 属升级项）、隧道管理
-- [ ] 特权守护进程：Windows 服务 / macOS launchd / Linux systemd，负责虚拟网卡（WinTun / utun / tun）与路由/DNS 接管，UI 通过本地 IPC 通信（复刻原 MotionPro.exe↔vpnd.exe 模型）
-- [ ] Tauri 2 前端：原生小体积 UI + 托盘 + 中/英/日 i18n（替代 Qt5 Widgets —— 属升级项）
-- [ ] monorepo 结构：core（协议）、daemon（特权服务）、platform（各平台网卡/路由封装）、app（Tauri UI）
+- [x] Rust 核心 crate：协议客户端骨架（state/reconnect/keepalive/frame/nat/protocol 已就绪；TLS 控制通道实现中）、TLS（rustls，替代旧 OpenSSL 1.0 —— 属升级项）、隧道管理
+- [x] 特权守护进程骨架（mp-daemon：IPC server + 1s 状态广播；Windows 服务注册在阶段4） / macOS launchd / Linux systemd，负责虚拟网卡（WinTun / utun / tun）与路由/DNS 接管，UI 通过本地 IPC 通信（复刻原 MotionPro.exe↔vpnd.exe 模型）
+- [x] Tauri 2 前端骨架（UI + 托盘 + i18n + Profile 管理面板） + 托盘 + 中/英/日 i18n（替代 Qt5 Widgets —— 属升级项）
+- [x] monorepo 结构：core/daemon/platform/app + mp-ipc（协议）、daemon（特权服务）、platform（各平台网卡/路由封装）、app（Tauri UI）
 
 ### 阶段1 工程骨架
 
@@ -44,7 +44,7 @@
 
 ### 阶段2 协议与隧道实现
 
-- [ ] 认证（含证书校验、HWID）、UDP/TCP 隧道模式、心跳与自动重连
+- [ ] 认证（含证书校验、HWID）、UDP/TCP 隧道模式、心跳与自动重连 —— 控制通道已实现（rustls TLS + an_login.js AAA 查询 + session cookie jar + postlogin apps，mock TLS 服务器端到端测试覆盖）；服务器证书严格校验待接入 rootca；数据帧格式待 Ghidra
 - [ ] 虚拟网卡数据面 + 路由/DNS 接管
 - [ ] 与原版客户端对拍验证（Wireshark 报文一致、连接成功率）
 
