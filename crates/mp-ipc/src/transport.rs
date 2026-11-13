@@ -44,13 +44,15 @@ mod tests {
         let addr = server.local_addr().unwrap().to_string();
 
         let client_task = tokio::spawn(async move {
-            let mut stream = tcp_connect(&addr).await.unwrap();
+            let stream = tcp_connect(&addr).await.unwrap();
+            let mut stream = tokio::io::BufReader::new(stream);
             send_request(&Request::Status, &mut stream).await.unwrap();
             let res = recv_response(&mut stream).await.unwrap();
             res
         });
 
-        let mut conn = server.accept().await.unwrap();
+        let conn = server.accept().await.unwrap();
+        let mut conn = tokio::io::BufReader::new(conn);
         let req = recv_request(&mut conn).await.unwrap();
         assert_eq!(req, Request::Status);
         send_response(&Response::Ok, &mut conn).await.unwrap();

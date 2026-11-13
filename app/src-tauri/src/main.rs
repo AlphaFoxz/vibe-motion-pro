@@ -3,6 +3,7 @@
 
 use mp_core::VpnStatus;
 use mp_ipc::codec::{recv_response, send_request};
+use mp_ipc::profile::ProfileMsg;
 use mp_ipc::status::StatusSnapshot;
 use mp_ipc::transport::tcp_connect;
 use mp_ipc::{Request, Response};
@@ -30,7 +31,8 @@ fn status_from_response(res: Response) -> StatusSnapshot {
 }
 
 async fn ask_daemon(req: Request) -> Result<Response, String> {
-    let mut stream = tcp_connect(DAEMON_ADDR).await.map_err(|e| e.to_string())?;
+    let stream = tcp_connect(DAEMON_ADDR).await.map_err(|e| e.to_string())?;
+    let mut stream = tokio::io::BufReader::new(stream);
     send_request(&req, &mut stream).await.map_err(|e| e.to_string())?;
     recv_response(&mut stream).await.map_err(|e| e.to_string())
 }
@@ -67,6 +69,32 @@ async fn vpn_session() -> Result<SessionInfo, String> {
     }
 }
 
+#[tauri::command]
+async fn profile_list() -> Result<Vec<ProfileMsg>, String> {
+    match ask_daemon(Request::ListProfiles).await? {
+        Response::Profiles { profiles } => Ok(profiles),
+        _ => Err("unexpected response".into()),
+    }
+}
+
+#[tauri::command]
+async fn profile_add(profile: ProfileMsg) -> Result<Vec<ProfileMsg>, String> {
+    match ask_daemon(Request::AddProfile { profile }).await? {
+        Response::Profiles { profiles } => Ok(profiles),
+        Response::Error { message } => Err(message),
+        _ => Err("unexpected response".into()),
+    }
+}
+
+#[tauri::command]
+async fn profile_remove(profile_id: String) -> Result<Vec<ProfileMsg>, String> {
+    match ask_daemon(Request::RemoveProfile { profile_id }).await? {
+        Response::Profiles { profiles } => Ok(profiles),
+        Response::Error { message } => Err(message),
+        _ => Err("unexpected response".into()),
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -74,7 +102,15 @@ fn main() {
     let _ = VpnStatus::Disconnected; // 保留引用
     tauri::Builder::default()
         .manage(AppEngine::default())
-        .invoke_handler(tauri::generate_handler![vpn_status, vpn_start, vpn_stop, vpn_session])
+        .invoke_handler(tauri::generate_handler![
+            vpn_status,
+            vpn_start,
+            vpn_stop,
+            vpn_session,
+            profile_list,
+            profile_add,
+            profile_remove
+        ])
         .setup(|app| {
             // 托盘图标（对齐原版三态：connected/disconnected/reconnecting）
             // TODO: 从 reference/ 提取原版 ico 后替换默认图标
