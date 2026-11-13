@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mp-core",
+    "crates/mp-daemon",
+    "crates/mp-platform",
+    "crates/mp-ipc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+smoltcp = "0.11"
+
+# daemon / platform 特权侧
+tun = { version = "0.6", features = ["async"] }   # utun/tun; windows 走 wintun 特性另配
+route = "0.2"                                     # 占位：路由/DNS 管理按平台再选型
+
+# ipc
+prost = "0.13"                                    # 或 JSON-RPC，先简单后演进

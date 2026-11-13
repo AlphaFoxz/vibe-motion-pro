@@ -1,0 +1,16 @@
+[package]
+name = "mp-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+windows = []
+macos = []
+linux = []
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

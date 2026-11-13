@@ -1,0 +1,14 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  rust:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --workspace
+      - run: cargo test --workspace
+      # app (Tauri) 构建在 SDK/前端依赖就绪后加入

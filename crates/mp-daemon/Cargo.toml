@@ -1,0 +1,17 @@
+[package]
+name = "mp-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mp-daemon"
+path = "src/main.rs"
+
+[dependencies]
+mp-core = { path = "../mp-core" }
+mp-platform = { path = "../mp-platform" }
+mp-ipc = { path = "../mp-ipc" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

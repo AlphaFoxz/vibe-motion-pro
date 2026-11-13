@@ -1,0 +1,14 @@
+59767f95b4f1d543716778266cdaeda5 *reference/binaries/ArrayWGClient.exe
+d8a7f9579eb396bcb737f3114da05320 *reference/binaries/InsideProxy.exe
+269768a56e4d3b5bc8791582414bb9a4 *reference/binaries/InsideProxySplit.exe
+39e10c216bff1fc29860d0da7ca1f745 *reference/binaries/MotionPro.exe
+6721e6003e9ca511a5e7afe8b68c8ee9 *reference/binaries/MotionProHttpd.exe
+a406c830c74d7175c305ef16d87710a6 *reference/binaries/vpn_getsid.exe
+dc66dd914b47013b219c2a790bfc2b89 *reference/binaries/vpnd.exe
+57a110a1c1d0359179437845a56503c2 *reference/binaries/vpnhwidtool_x64.exe
+d97e77e15f06202da0cbc728187030f8 *reference/binaries/ArrayVPNApi.dll
+98be587506e5a36bf00cc714ea16fb6c *reference/binaries/CSLaunchAX.dll
+3b3e5c6937451dea1e3fcfdac481a778 *reference/binaries/SecurityGateway.dll
+fa97487786f82edc7cb54d885fa1f8cc *reference/binaries/libeay32.dll
+34ac778c62721cd33a1bdfe58253026a *reference/binaries/ssleay32.dll
+0a2800d82fb900ea3cb8050e3677ad00 *reference/binaries/vl3vpn.dll
