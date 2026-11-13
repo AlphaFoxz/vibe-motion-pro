@@ -27,25 +27,43 @@ pub const CAPTCHA_PATH: &str = "/restservice/vpnLogin/getImage";
 pub const PORTAL_WS_COMMAND: &str = "/ws/command";
 pub const PORTAL_WS_NOTIFY: &str = "/ws/notify";
 
-/// 登录提交端点（HAR：/restservice/vpnLogin/*，POST 路径待响应头最终确认）。
-pub const LOGIN_SUBMIT_PATH: &str = "/restservice/vpnLogin/login";
+/// 令牌登录预校验端点（门户 main.js 实证：先校验动态密保，返回 {"message":"Success"}）。
+pub const TOKEN_PRECHECK_PATH: &str = "/restservice/vpnLogin/nextVpnNumberPhone";
 
-/// 登录表单字段（HAR 实测字段名；凭据值匿名化后不入库）。
+/// AG 网关主机（门户 index.html 登录表单 action 实证：https://vpntoken.baosteel.com/prx/...）。
+pub const AG_GATEWAY_HOST: &str = "vpntoken.baosteel.com";
+
+/// 登录提交端点（门户 index.html form action 实证；与反编译 /prx/000/http/localhost/login 吻合）。
+/// 注意：提交主机是表单 action 里的 AG 网关（vpntoken.baosteel.com），不是登录门户。
+pub const LOGIN_SUBMIT_PATH: &str = "/prx/000/http/localhost/login";
+
+/// /prx 登录表单字段（index.html 实证：method=test&uname=&pwd=&authCode=）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LoginFormData {
     /// 固定 "t"（登录类型标记，原版实测值）
     pub t: String,
     pub user_code: String,
     pub pwd: String,
-    /// 验证码（来自 CAPTCHA_PATH，uuid 关联）
+    /// 动态密保码（来自手机令牌 App）
     pub code: String,
 }
 
 impl LoginFormData {
+    /// 预校验体：POST TOKEN_PRECHECK_PATH（t/userCode/pwd/code，门户 main.js 实证）。
     pub fn to_form_urlencoded(&self) -> String {
         format!(
             "t={}&userCode={}&pwd={}&code={}",
             urlencode(&self.t),
+            urlencode(&self.user_code),
+            urlencode(&self.pwd),
+            urlencode(&self.code)
+        )
+    }
+
+    /// /prx 登录体：POST LOGIN_SUBMIT_PATH（method/uname/pwd/authCode，index.html form 实证）。
+    pub fn to_prx_form_urlencoded(&self) -> String {
+        format!(
+            "method=test&uname={}&pwd={}&authCode={}",
             urlencode(&self.user_code),
             urlencode(&self.pwd),
             urlencode(&self.code)
@@ -434,6 +452,43 @@ pub struct PostloginApps {
     pub site: SiteConfig,
     #[serde(default)]
     pub wg: Option<WgConfig>,
+}
+
+impl PostloginApps {
+    /// 容错解析：真实网关响应可能带 __sys__/__blocks__ 包装（真机实测 182 字节响应
+    /// 直接反序列化得到空 site）。递归查找 "site"/"wg" 对象再提取。
+    pub fn parse_tolerant(body: &str) -> Result<Self, String> {
+        let v: serde_json::Value =
+            serde_json::from_str(body.trim()).map_err(|e| format!("json: {e}"))?;
+        let site = Self::find_object(&v, "site")
+            .ok_or_else(|| "no 'site' object in response".to_string())?;
+        let site: SiteConfig = serde_json::from_value(site.clone())
+            .map_err(|e| format!("site fields: {e}"))?;
+        let wg = Self::find_object(&v, "wg")
+            .and_then(|w| serde_json::from_value(w.clone()).ok());
+        Ok(Self { site, wg })
+    }
+
+    /// 深度优先找到第一个名为 key 的对象成员。
+    fn find_object<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        match v {
+            serde_json::Value::Object(m) => {
+                if let Some(x) = m.get(key) {
+                    if x.is_object() {
+                        return Some(x);
+                    }
+                }
+                for x in m.values() {
+                    if let Some(found) = Self::find_object(x, key) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            serde_json::Value::Array(a) => a.iter().find_map(|x| Self::find_object(x, key)),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -20,3 +20,4 @@ mp-ipc = { path = "../mp-ipc" }
 [dev-dependencies]
 rcgen = "0.13"
 tokio = { workspace = true, features = ["test-util", "net"] }
+tracing-subscriber = { workspace = true }

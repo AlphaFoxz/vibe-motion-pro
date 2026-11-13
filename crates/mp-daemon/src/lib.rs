@@ -34,28 +34,106 @@ pub async fn connect_with_login(
     let client = ControlClient::new(host, port, true).map_err(|e| e.to_string())?;
     let mut session = Session::default();
 
-    // 1. 登录（动态密保码来自手机 App）
+    // 1a. 先取一次 getImage（浏览器流程必经）：种服务器端验证码会话（uuid cookie），
+    //     否则登录 POST 被网关静默丢弃（真机实测）。图片字节不需要（动态密保来自手机 App）。
+    let uuid = uuid_simple();
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.fetch_captcha(&mut session, &uuid),
+    )
+    .await;
+    tracing::debug!("captcha session seeded (uuid={uuid})");
+
+    // 1b. 令牌预校验（门户 main.js 实证：POST nextVpnNumberPhone → {"message":"Success"}）
     let form = LoginFormData {
         t: "t".into(),
         user_code: username.to_string(),
         pwd: password.to_string(),
         code: code.to_string(),
     };
-    client.login(&mut session, &form).await.map_err(|e| login_err("login", &e))?;
+    match tokio::time::timeout(std::time::Duration::from_secs(15), client.token_precheck(&mut session, &form)).await {
+        Ok(Ok(())) => tracing::info!("precheck ok: 动态密保校验通过"),
+        Ok(Err(e)) => return Err(login_err("precheck", &e)),
+        Err(_) => return Err("precheck: 15s 超时".into()),
+    }
 
-    // 2. postlogin apps：站点/会话信息
-    let body = client
-        .postlogin_apps(&mut session, username, "0")
-        .await
-        .map_err(|e| login_err("postlogin", &e))?;
-    let apps: PostloginApps =
-        serde_json::from_str(body.trim()).map_err(|e| format!("postlogin parse: {e}"))?;
+    // 1c. /prx 登录：AG 网关地址从门户首页表单 action 解析（index.html 实证），
+    //     解析失败回退到已知常量 vpntoken.baosteel.com
+    let action = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.fetch_login_action(&mut session),
+    )
+    .await
+    {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => {
+            tracing::warn!("fetch_login_action failed: {e}, fallback to known AG host");
+            format!("https://{}/prx/000/http/localhost/login", mp_core::protocol::AG_GATEWAY_HOST)
+        }
+        Err(_) => {
+            tracing::warn!("fetch_login_action timeout, fallback to known AG host");
+            format!("https://{}/prx/000/http/localhost/login", mp_core::protocol::AG_GATEWAY_HOST)
+        }
+    };
+    let ag_host = url_host(&action).unwrap_or_else(|| mp_core::protocol::AG_GATEWAY_HOST.to_string());
+    let ag_port = url_port(&action).unwrap_or(443);
+    tracing::info!("AG gateway: {ag_host}:{ag_port} (action={action})");
+    let ag_client = ControlClient::new(&ag_host, ag_port, true).map_err(|e| e.to_string())?;
+    let (login_status, location) =
+        ag_client.login(&mut session, &form).await.map_err(|e| login_err("login", &e))?;
+    tracing::info!("login ok: status={login_status}, redirect={location:?}");
 
-    // 3. 建隧道：host 取 site.domain（AG 网关），port 取 site.port（缺省 443）
-    let tunnel_host = if apps.site.domain.is_empty() { host.to_string() } else { apps.site.domain.clone() };
-    let tunnel_port = if apps.site.port == 0 { port } else { apps.site.port };
+    // 原版客户端在隧道请求里带 ANStandalone=true（T2/Ghidra 实证），登录后补种
+    if !session.cookies.iter().any(|c| c.starts_with("ANStandalone")) {
+        session.cookies.push("ANStandalone=true".into());
+    }
+
+    // postlogin apps：可选步骤（l3vpn.js 实证：原版 WS 启动消息不含 postlogin 结果，
+    // 原版日志"返回 2 = 无资源，继续 L3VPN"）。失败/票据不合法不阻断，仅记录。
+    let apps = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.postlogin_apps(&mut session, username, "0"),
+    )
+    .await
+    {
+        Ok(Ok(body)) => match PostloginApps::parse_tolerant(&body) {
+            Ok(apps) if !apps.site.domain.is_empty() => {
+                tracing::info!("postlogin ok: domain={:?} port={}", apps.site.domain, apps.site.port);
+                apps
+            }
+            Ok(_) => {
+                tracing::warn!("postlogin returned no site info (可能票据域不匹配), 按无资源继续 L3VPN");
+                PostloginApps::default()
+            }
+            Err(e) => {
+                tracing::warn!("postlogin parse failed: {e}, 按无资源继续 L3VPN");
+                PostloginApps::default()
+            }
+        },
+        Ok(Err(e)) => {
+            tracing::warn!("postlogin request failed: {e}, 按无资源继续 L3VPN");
+            PostloginApps::default()
+        }
+        Err(_) => {
+            tracing::warn!("postlogin 15s 超时, 按无资源继续 L3VPN");
+            PostloginApps::default()
+        }
+    };
+
+    // 3. 建隧道（l3vpn.js startVpn 实证）：host=AG 网关（欢迎页主机）、port=443、
+    //    会话=ANsession cookie；postlogin 的 site.domain 仅作覆盖（若有效）
+    let tunnel_host = if apps.site.domain.is_empty() { ag_host.to_string() } else { apps.site.domain.clone() };
+    let tunnel_port = if apps.site.port == 0 { 443 } else { apps.site.port };
+    tracing::info!("tunnel target: {tunnel_host}:{tunnel_port}");
     let tclient = ControlClient::new(&tunnel_host, tunnel_port, true).map_err(|e| e.to_string())?;
-    let cookie = session.cookies.join("; ");
+    // 会话 cookie（vpntunnel_request 会自动加 "ANStandalone=true;" 前缀，这里只送 ANsession）
+    let cookie = session
+        .cookies
+        .iter()
+        .filter(|c| c.starts_with("ANsession"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
     let params = TunnelOpenParams {
         cookie: &cookie,
         dev_type: 1,
@@ -126,6 +204,51 @@ fn login_err(stage: &str, e: &mp_core::control::ControlError) -> String {
         }
         other => format!("{stage}: {other}"),
     }
+}
+
+/// 日志脱敏：把 JSON 里指定字符串键的值打码（"key":"val" → "key":"***"）。
+fn redact_json_value(body: &str, key: &str) -> String {
+    let pat = format!("\"{key}\":\"");
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(pos) = rest.find(&pat) {
+        out.push_str(&rest[..pos + pat.len()]);
+        let after = &rest[pos + pat.len()..];
+        match after.find('"') {
+            Some(end) => {
+                out.push_str("***\"");
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(after);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 简易 uuid（v4 形态，验证码会话关联用，无密码学要求）。
+fn uuid_simple() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let pid = std::process::id();
+    format!("{ms:x}{pid:x}{:04x}", (ms as u16) ^ (pid as u16))
+}
+
+/// 从 Location 头提取主机名（支持 "https://host[:port]/path" 与 "host:port/path"）。
+fn url_host(loc: &str) -> Option<String> {
+    let rest = loc.split("://").nth(1).unwrap_or(loc);
+    rest.split(['/', '?', '#']).next()?.split(':').next().map(|s| s.to_string())
+}
+
+/// 从 Location 头提取端口（缺省 443）。
+fn url_port(loc: &str) -> Option<u16> {
+    let rest = loc.split("://").nth(1).unwrap_or(loc);
+    let auth = rest.split(['/', '?', '#']).next()?;
+    let port = auth.split(':').nth(1)?;
+    port.parse().ok()
 }pub mod netloop;
 pub mod tunsetup;
 use mp_ipc::codec::{recv_request, send_response};
@@ -335,7 +458,10 @@ async fn handle_connect(
             }
             Response::Status { status: status_snapshot(&state.engine) }
         }
-        Err(message) => Response::Error { message },
+        Err(message) => {
+            tracing::warn!("connect failed: {message}");
+            Response::Error { message }
+        }
     }
 }
 
@@ -550,6 +676,35 @@ mod tests {
     }
 
     /// 全链路 mock 网关：login / postlogin / vpntunnel / 数据回显 一体。
+    /// 读取完整 HTTP 请求（头 + Content-Length 体），避免分包竞态。
+    async fn read_http_request(
+        tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = Vec::with_capacity(4096);
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = tls.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                let clen: usize = head
+                    .lines()
+                    .find_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string())))
+                    .filter(|(k, _)| k == "content-length")
+                    .and_then(|(_, v)| v.parse().ok())
+                    .unwrap_or(0);
+                if buf.len() >= pos + 4 + clen {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
     async fn spawn_mock_gateway() -> u16 {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -571,13 +726,28 @@ mod tests {
                 let port = port;
                 tokio::spawn(async move {
                     let Ok(mut tls) = acceptor.accept(sock).await else { return };
-                    let mut buf = vec![0u8; 16384];
-                    let Ok(n) = tls.read(&mut buf).await else { return };
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let req = read_http_request(&mut tls).await;
+                    let _ = &req;
 
-                    if req.starts_with("POST /restservice/vpnLogin/login") {
+                    if req.starts_with("GET / ") || req.starts_with("GET /?") {
+                        // 门户首页：登录表单 action 指回本 mock（AG 网关）
+                        let body = format!(
+                            "<form id=\"form-password\" method=\"post\" action=\"https://127.0.0.1:{port}/prx/000/http/localhost/login\">"
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = tls.write_all(resp.as_bytes()).await;
+                    } else if req.starts_with("POST /restservice/vpnLogin/nextVpnNumberPhone") {
                         assert!(req.contains("userCode=example_user"));
                         assert!(req.contains("code=654321"), "动态密保码: {req}");
+                        let _ = tls
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\r\n{\"message\":\"Success\"}")
+                            .await;
+                    } else if req.starts_with("POST /prx/000/http/localhost/login") {
+                        assert!(req.contains("uname=example_user"));
+                        assert!(req.contains("authCode=654321"), "动态密保码: {req}");
                         let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\
                                     Set-Cookie: ANsession1=tok; Path=/\r\n\r\n";
                         let _ = tls.write_all(resp.as_bytes()).await;
@@ -731,11 +901,26 @@ mod tests {
         tokio::spawn(async move {
             while let Ok((sock, _)) = listener.accept().await {
                 let acceptor = acceptor.clone();
+                let port = port;
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let Ok(mut tls) = acceptor.accept(sock).await else { return };
-                    let mut buf = vec![0u8; 8192];
-                    if tls.read(&mut buf).await.is_ok() {
+                    let req = read_http_request(&mut tls).await;
+                    if req.starts_with("GET / ") {
+                        let body = format!(
+                            "<form method=\"post\" action=\"https://127.0.0.1:{port}/prx/000/http/localhost/login\">"
+                        );
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = tls.write_all(resp.as_bytes()).await;
+                    } else if req.starts_with("POST /restservice/vpnLogin/nextVpnNumberPhone") {
+                        let _ = tls
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\r\n{\"message\":\"Success\"}")
+                            .await;
+                    } else if req.starts_with("POST /prx/000/http/localhost/login") {
+                        // 200 但不种 ANsession → 认证失败
                         let _ = tls
                             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                             .await;

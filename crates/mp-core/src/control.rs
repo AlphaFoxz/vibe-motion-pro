@@ -29,6 +29,8 @@ pub enum ControlError {
     HttpStatus(u16),
     #[error("login rejected (no ANsession cookie)")]
     AuthFailed,
+    #[error("operation timed out: {0}")]
+    Timeout(&'static str),
     #[error("malformed response")]
     Malformed,
 }
@@ -73,6 +75,32 @@ pub fn parse_response(raw: &[u8]) -> Result<HttpResponse, ControlError> {
     Ok(HttpResponse { status, headers, body: body.to_string() })
 }
 
+/// 解码 chunked 体（容错：格式异常时返回原始字节）。
+fn decode_chunked(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut pos = 0usize;
+    loop {
+        // 找 chunk 大小行的 \r\n
+        let Some(line_end) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
+            out.extend_from_slice(&raw[pos..]);
+            return out;
+        };
+        let size_str = String::from_utf8_lossy(&raw[pos..pos + line_end]);
+        let size = usize::from_str_radix(size_str.trim().split(';').next().unwrap_or("0"), 16)
+            .unwrap_or(0);
+        if size == 0 {
+            return out;
+        }
+        let start = pos + line_end + 2;
+        let end = (start + size).min(raw.len());
+        out.extend_from_slice(&raw[start..end]);
+        if end >= raw.len() {
+            return out;
+        }
+        pos = end + 2; // 跳过块尾 \r\n
+    }
+}
+
 /// 会话：cookie jar + AAA 方式缓存。
 #[derive(Debug, Clone, Default)]
 pub struct Session {
@@ -80,6 +108,9 @@ pub struct Session {
     pub aaa_methods: Vec<String>,
     pub server: String,
 }
+
+/// 浏览器式公共请求头（企业网关 WAF 常按 UA/Referer 过滤，缺失会被静默丢弃）。
+pub const BROWSER_LIKE_HEADERS: &str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\nAccept: */*\r\nAccept-Language: zh-CN,zh;q=0.9\r\nX-Requested-With: XMLHttpRequest\r\n";
 
 /// 控制通道客户端。
 pub struct ControlClient {
@@ -108,16 +139,27 @@ impl ControlClient {
     fn build_connector(danger: bool) -> Result<TlsConnector, ControlError> {
         // workspace 同时启用 ring/aws-lc-rs feature 时 rustls 无法自动选择，显式指定 ring
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let cfg = if danger {
-            rustls::ClientConfig::builder()
+        // 强制 TLS 1.2：原版客户端 TLSV_12=true（ArrayVPNApi INI 实证），网关对 TLS 1.3
+        // "握手成功但请求装死"（真机实测）。只影响我们发起的连接。
+        let versions = &[&rustls::version::TLS12];
+        let mut cfg = if danger {
+            rustls::ClientConfig::builder_with_protocol_versions(versions)
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoVerify))
                 .with_no_client_auth()
         } else {
             // TODO: rustls-native-certs 载入系统根证书 + 原版 rootca pinning
             let roots = rustls::RootCertStore::empty();
-            rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth()
+            rustls::ClientConfig::builder_with_protocol_versions(versions)
+                .with_root_certificates(roots)
+                .with_no_client_auth()
         };
+        // ALPN http/1.1：网关前端是反向代理（Reverse Proxy Server/2.8.1），无 ALPN 时
+        // 按 HTTP/2 语义处理请求 → 静默丢弃（真机实测 curl 对照定位）。
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        // 禁用 TLS 会话复用：AG 网关 resume 后的连接会被 RST（真机实测 login 成功后
+        // postlogin 复用会话被 10054 重置；完整握手稳定）。每次握手仅多 ~20ms。
+        cfg.resumption = rustls::client::Resumption::disabled();
         Ok(TlsConnector::from(Arc::new(cfg)))
     }
 
@@ -128,42 +170,38 @@ impl ControlClient {
         Ok(self.connector.connect(name, tcp).await?)
     }
 
+    /// GET 任意路径（探针/调试用）：新连接 + 会话 cookie。
+    pub async fn get_public(
+        &self,
+        path: &str,
+        session: &mut Session,
+    ) -> Result<HttpResponse, ControlError> {
+        let mut stream = self.connect_tls().await?;
+        self.get(&mut stream, path, session).await
+    }
+
     /// GET 并解析；自动附带 session cookie，自动捕获 Set-Cookie。
+    /// 支持 Content-Length 与 chunked 两种响应体（真机网关用 chunked）。
     async fn get(
         &self,
         stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
         path: &str,
         session: &mut Session,
     ) -> Result<HttpResponse, ControlError> {
+        use tokio::io::AsyncWriteExt;
         let cookie_hdr = if session.cookies.is_empty() {
             String::new()
         } else {
             format!("Cookie: {}\r\n", session.cookies.join("; "))
         };
         let req = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: Keep-Alive\r\n{cookie_hdr}\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {}\r\n{BROWSER_LIKE_HEADERS}Connection: Keep-Alive\r\n{cookie_hdr}\r\n",
             self.host
         );
         stream.write_all(req.as_bytes()).await?;
-        let mut buf = Vec::with_capacity(8192);
-        let mut chunk = [0u8; 4096];
-        loop {
-            let n = stream.read(&mut chunk).await?;
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            // 头完整后按 Content-Length 判断是否读完
-            if let Ok(resp) = parse_response(&buf) {
-                let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
-                let clen: usize =
-                    resp.header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
-                if resp.header("transfer-encoding").is_none() && buf.len() >= header_end + clen {
-                    break;
-                }
-            }
-        }
-        let mut resp = parse_response(&buf)?;
+        let (head, body) = Self::read_response_raw(stream).await?;
+        let mut resp = parse_response(&head)?;
+        resp.body = String::from_utf8_lossy(&body).to_string();
         for c in resp.set_cookies() {
             if !session.cookies.contains(&c) {
                 session.cookies.push(c);
@@ -215,7 +253,8 @@ impl ControlClient {
         let mut stream = self.connect_tls().await?;
         let path = format!("{}?d={}&uuid={}", crate::protocol::CAPTCHA_PATH, now_ms(), uuid);
         let req = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: Keep-Alive\r\n",
+            // 注意结尾必须有空行（\r\n\r\n）结束请求头，否则服务器等待后续头不响应（真机实测）
+            "GET {path} HTTP/1.1\r\nHost: {}\r\n{BROWSER_LIKE_HEADERS}Connection: Keep-Alive\r\n\r\n",
             self.host
         );
         stream.write_all(req.as_bytes()).await?;
@@ -232,45 +271,130 @@ impl ControlClient {
         Ok(body)
     }
 
-    /// 步骤 2b：提交登录（用户名/密码/动态验证码 → ANsession cookie）。
-    /// HAR + 用户实测字段：t=t&userCode=...&pwd=...&code=...
-    pub async fn login(
+    /// 步骤 2a：取门户首页并解析登录表单 action（AG 网关地址的唯一权威来源）。
+    /// index.html: <form method="post" action="https://vpntoken.baosteel.com/prx/000/http/localhost/login">
+    pub async fn fetch_login_action(&self, session: &mut Session) -> Result<String, ControlError> {
+        let mut stream = self.connect_tls().await?;
+        let resp = self.get(&mut stream, "/", session).await?;
+        if resp.status != 200 {
+            return Err(ControlError::HttpStatus(resp.status));
+        }
+        let html = &resp.body;
+        let key = "action=\"";
+        let Some(start) = html.find(key) else {
+            return Err(ControlError::Malformed);
+        };
+        let rest = &html[start + key.len()..];
+        let Some(end) = rest.find('"') else {
+            return Err(ControlError::Malformed);
+        };
+        Ok(rest[..end].to_string())
+    }
+
+    /// 步骤 2a'：令牌预校验（门户 main.js 实证）。
+    /// POST TOKEN_PRECHECK_PATH，期望 JSON {"message":"Success"}。
+    pub async fn token_precheck(
         &self,
         session: &mut Session,
         form: &crate::protocol::LoginFormData,
     ) -> Result<(), ControlError> {
+        use tokio::io::AsyncWriteExt;
         let mut stream = self.connect_tls().await?;
         let body = form.to_form_urlencoded();
-        let cookie_hdr = if session.cookies.is_empty() {
-            String::new()
-        } else {
-            format!("Cookie: {}\r\n", session.cookies.join("; "))
-        };
         let req = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-www-form-urlencoded\r\n\
-             Content-Length: {}\r\nConnection: Keep-Alive\r\n{cookie_hdr}\r\n{body}",
-            crate::protocol::LOGIN_SUBMIT_PATH,
+            "POST {} HTTP/1.1\r\nHost: {}\r\n{BROWSER_LIKE_HEADERS}\
+             Content-Type: application/x-www-form-urlencoded;charset=UTF-8\r\n\
+             Content-Length: {}\r\nReferer: https://{}/\r\nConnection: Keep-Alive\r\n\r\n{body}",
+            crate::protocol::TOKEN_PRECHECK_PATH,
             self.host,
-            body.len()
+            body.len(),
+            self.host
         );
         stream.write_all(req.as_bytes()).await?;
-        let (head, _body) = Self::read_response_raw(&mut stream).await?;
+        let (head, resp_body) = Self::read_response_raw(&mut stream).await?;
         let resp = parse_response(&head)?;
         for c in resp.set_cookies() {
             if !session.cookies.contains(&c) {
                 session.cookies.push(c);
             }
         }
-        // 失败形态未抓包确认：宽容处理 —— 200/302 且种下会话 cookie 即视为成功
-        let has_an = session.cookies.iter().any(|c| c.starts_with("ANsession"));
-        match resp.status {
-            200 | 302 if has_an => Ok(()),
-            200 | 302 => Err(ControlError::AuthFailed),
-            other => Err(ControlError::HttpStatus(other)),
+        if resp.status != 200 {
+            return Err(ControlError::HttpStatus(resp.status));
+        }
+        let text = String::from_utf8_lossy(&resp_body);
+        #[derive(serde::Deserialize)]
+        struct PrecheckResp {
+            message: String,
+        }
+        match serde_json::from_str::<PrecheckResp>(text.trim()) {
+            Ok(r) if r.message == "Success" => Ok(()),
+            Ok(r) => {
+                tracing::warn!("precheck rejected: {}", r.message);
+                Err(ControlError::AuthFailed)
+            }
+            Err(_) => Err(ControlError::Malformed),
         }
     }
 
-    /// 读完整响应：返回 (头字节, 体字节)。按 Content-Length 精确读取（支持二进制体）。
+    /// 步骤 2b：提交 /prx 登录表单（index.html form action 实证：
+    /// POST https://<AG网关>/prx/000/http/localhost/login，method=test&uname=&pwd=&authCode=）。
+    /// 本方法应通过 AG 网关主机构造的 ControlClient 调用（表单 action 的目标主机）。
+    /// 返回 (状态码, 302 跳转目标)。
+    pub async fn login(
+        &self,
+        session: &mut Session,
+        form: &crate::protocol::LoginFormData,
+    ) -> Result<(u16, Option<String>), ControlError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let fut = async {
+            let mut stream = self.connect_tls().await?;
+            let body = form.to_prx_form_urlencoded();
+            let cookie_hdr = if session.cookies.is_empty() {
+                String::new()
+            } else {
+                format!("Cookie: {}\r\n", session.cookies.join("; "))
+            };
+            let req = format!(
+                "POST {} HTTP/1.1\r\nHost: {}\r\n{BROWSER_LIKE_HEADERS}\
+                 Content-Type: application/x-www-form-urlencoded\r\n\
+                 Content-Length: {}\r\nReferer: https://{}/\r\nConnection: Keep-Alive\r\n{cookie_hdr}\r\n{body}",
+                crate::protocol::LOGIN_SUBMIT_PATH,
+                self.host,
+                body.len(),
+                self.host
+            );
+            stream.write_all(req.as_bytes()).await?;
+            let (head, resp_body) = Self::read_response_raw(&mut stream).await?;
+            let resp = parse_response(&head)?;
+            for c in resp.set_cookies() {
+                if !session.cookies.contains(&c) {
+                    session.cookies.push(c);
+                }
+            }
+            if resp.status == 200 {
+                // 200 可能是"登录失败回显页"：打一小段便于定位
+                let text = String::from_utf8_lossy(&resp_body);
+                let snippet: String = text.chars().take(200).collect();
+                tracing::warn!("login got 200 (not redirect), body head: {snippet}");
+            }
+            Ok::<_, ControlError>((resp.status, resp.header("location").map(|s| s.to_string())))
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(15), fut).await {
+            Ok(r) => {
+                let (status, location) = r?;
+                let has_an = session.cookies.iter().any(|c| c.starts_with("ANsession"));
+                match status {
+                    200 | 302 if has_an => Ok((status, location)),
+                    200 | 302 => Err(ControlError::AuthFailed),
+                    other => Err(ControlError::HttpStatus(other)),
+                }
+            }
+            Err(_) => Err(ControlError::Timeout("login")),
+        }
+    }
+
+    /// 读完整响应：返回 (头字节, 体字节)。
+    /// 支持 Content-Length 精确读取与 Transfer-Encoding: chunked（真机网关用 chunked）。
     async fn read_response_raw(
         stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
     ) -> Result<(Vec<u8>, Vec<u8>), ControlError> {
@@ -286,7 +410,24 @@ impl ControlClient {
             }
             buf.extend_from_slice(&chunk[..n]);
         };
-        let clen: usize = parse_response(&buf[..head_end])?
+        let resp = parse_response(&buf[..head_end])?;
+        let chunked = resp
+            .header("transfer-encoding")
+            .map(|v| v.to_ascii_lowercase().contains("chunked"))
+            .unwrap_or(false);
+        if chunked {
+            // 读到终止块 0\r\n\r\n
+            while !buf.ends_with(b"0\r\n\r\n") {
+                let n = stream.read(&mut chunk).await?;
+                if n == 0 {
+                    break; // 对端提前关闭：尽力而为
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let body = decode_chunked(&buf[head_end..]);
+            return Ok((buf[..head_end].to_vec(), body));
+        }
+        let clen: usize = resp
             .header("content-length")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
@@ -406,9 +547,9 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// 骨架阶段：不校验服务器证书。
+/// 骨架阶段：不校验服务器证书（探针也复用）。
 #[derive(Debug)]
-struct NoVerify;impl rustls::client::danger::ServerCertVerifier for NoVerify {
+pub struct NoVerify;impl rustls::client::danger::ServerCertVerifier for NoVerify {
     fn verify_server_cert(
         &self,
         _end_entity: &rustls::pki_types::CertificateDer<'_>,
@@ -753,10 +894,13 @@ mod tests {
                         );
                         tls.write_all(resp.as_bytes()).await.unwrap();
                         tls.write_all(img).await.unwrap();
-                    } else if req.starts_with("POST /restservice/vpnLogin/login") {
+                    } else if req.starts_with("POST /restservice/vpnLogin/nextVpnNumberPhone") {
+                        // 预校验：成功 JSON（门户 main.js 契约）
+                        tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\n\r\n{\"message\":\"Success\"}").await.unwrap();
+                    } else if req.starts_with("POST /prx/000/http/localhost/login") {
                         assert!(req.contains("Content-Type: application/x-www-form-urlencoded"));
                         let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
-                        assert!(body.contains("t=t&userCode=example_user&pwd=p%40ss&code=1234"), "form: {body}");
+                        assert!(body.contains("method=test&uname=example_user&pwd=p%40ss&authCode=1234"), "form: {body}");
                         let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\
                                     Set-Cookie: ANsession1716635751154266=abc; Path=/\r\n\r\n";
                         tls.write_all(resp.as_bytes()).await.unwrap();
@@ -781,13 +925,14 @@ mod tests {
         assert_eq!(img, vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9]);
         assert!(session.cookies.contains(&"captcha_uuid=u1".to_string()));
 
-        // 2. 登录提交：ANsession 种下
+        // 2. 预校验 + 登录提交：ANsession 种下
         let form = crate::protocol::LoginFormData {
             t: "t".into(),
             user_code: "example_user".into(),
             pwd: "p@ss".into(),
             code: "1234".into(),
         };
+        client.token_precheck(&mut session, &form).await.unwrap();
         client.login(&mut session, &form).await.unwrap();
         assert!(session.cookies.iter().any(|c| c.starts_with("ANsession")));
     }
