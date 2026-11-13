@@ -30,15 +30,17 @@ mod netcfg_tests {
         mgr.add_route("192.168.88.0/24").unwrap();
         mgr.revert().unwrap();
         let log = dry.log();
-        // 当前为 Windows 平台：route add / route delete 逆序回滚
-        assert!(log[0].starts_with("route add 10.3.130.0 mask 255.255.255.0 10.111.222.1 metric 25"));
-        assert!(log[1].contains("192.168.88.0 mask 255.255.255.0"));
+        // 当前为 Windows 平台：add_route 先清同前缀旧路由，revert 再逆序删除
+        assert!(log[0].starts_with("route delete 10.3.130.0"));
+        assert!(log[1].starts_with("route add 10.3.130.0 mask 255.255.255.0 10.111.222.1 metric 25"));
         assert!(log[2].starts_with("route delete 192.168.88.0"));
-        assert!(log[3].starts_with("route delete 10.3.130.0"));
-        assert_eq!(log.len(), 4);
+        assert!(log[3].starts_with("route add 192.168.88.0 mask 255.255.255.0"));
+        assert!(log[4].starts_with("route delete 192.168.88.0"));
+        assert!(log[5].starts_with("route delete 10.3.130.0"));
+        assert_eq!(log.len(), 6);
         // 幂等：无路由/DNS 残留时 revert 不再执行命令
         mgr.revert().unwrap();
-        assert_eq!(dry.log().len(), 4);
+        assert_eq!(dry.log().len(), 6);
     }
 
     #[test]
