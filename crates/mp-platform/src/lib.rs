@@ -14,6 +14,8 @@ pub enum PlatformError {
 }
 
 /// 虚拟网卡句柄（对齐原版 vl3vpn.dll 能力）。
+pub mod route;
+
 pub struct VpnAdapter {
     pub name: String,
     pub mtu: u16,

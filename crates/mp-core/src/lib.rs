@@ -6,6 +6,7 @@ pub mod engine;
 pub mod error;
 pub mod frame;
 pub mod keepalive;
+pub mod nat;
 pub mod profile;
 pub mod protocol;
 pub mod reconnect;
