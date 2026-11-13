@@ -50,6 +50,18 @@ async fn vpn_status(state: State<'_, AppEngine>) -> Result<StatusSnapshot, Strin
 }
 
 #[tauri::command]
+async fn vpn_connect(
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    code: String,
+) -> Result<StatusSnapshot, String> {
+    let res = ask_daemon(Request::Connect { host, port, username, password, code }).await?;
+    Ok(status_from_response(res))
+}
+
+#[tauri::command]
 async fn vpn_start(profile_id: String) -> Result<StatusSnapshot, String> {
     let res = ask_daemon(Request::Start { profile_id }).await?;
     Ok(status_from_response(res))
@@ -104,6 +116,7 @@ fn main() {
         .manage(AppEngine::default())
         .invoke_handler(tauri::generate_handler![
             vpn_status,
+            vpn_connect,
             vpn_start,
             vpn_stop,
             vpn_session,

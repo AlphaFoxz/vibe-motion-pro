@@ -286,6 +286,84 @@ pub fn decode_config_frame(buf: &[u8]) -> Option<Result<(ConfigMsgType, Vec<u8>,
     Some(Ok((kind, buf[CONFIG_FRAME_HEADER_LEN..total].to_vec(), total)))
 }
 
+/// 编码 48 字节网络配置请求帧（'T'；Ghidra T3：get_config.c 0x5f4-0x61f）。
+/// 布局：16B 头 {[0]='T' [12]=载荷长 0x20(LE)} + 32B 载荷
+/// {[16]=本机地址数 [20..40]=5×本机 IPv4 [40..46]=网卡 MAC}。
+/// TODO(抓包): 载荷逐字段对齐待真机验证。
+pub fn network_config_request(local_ips: &[[u8; 4]], mac: &[u8; 6]) -> Vec<u8> {
+    let mut f = vec![0u8; CONFIG_FRAME_HEADER_LEN + 32];
+    f[0] = 0x54; // 'T'
+    f[12..16].copy_from_slice(&32u32.to_le_bytes());
+    f[16] = local_ips.len().min(5) as u8;
+    for (i, ip) in local_ips.iter().take(5).enumerate() {
+        f[20 + i * 4..24 + i * 4].copy_from_slice(ip);
+    }
+    f[40..46].copy_from_slice(mac);
+    f
+}
+
+/// 'U' 网络配置（宽容解析 —— 真实字段名待抓包确认；候选键按原版线索）：
+/// 虚拟 IP：virip / virtual_ip / ip / address；掩码：mask/netmask；
+/// DNS：dns/dns_list/dns_servers；路由：routes/include_zone。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct NetworkConfig {
+    #[serde(default)]
+    pub virtual_ip: Option<std::net::Ipv4Addr>,
+    #[serde(default)]
+    pub netmask: Option<std::net::Ipv4Addr>,
+    #[serde(default)]
+    pub dns: Vec<std::net::Ipv4Addr>,
+}
+
+impl NetworkConfig {
+    /// 从任意 JSON 提取（递归浅扫键名候选）。
+    pub fn from_json(value: &serde_json::Value) -> Self {
+        use serde_json::Value;
+        let mut out = Self::default();
+        fn walk(v: &Value, out: &mut NetworkConfig) {
+            match v {
+                Value::Object(m) => {
+                    for (k, val) in m {
+                        match k.to_ascii_lowercase().as_str() {
+                            "virip" | "virtual_ip" | "vnic_ip" => {
+                                if out.virtual_ip.is_none() {
+                                    out.virtual_ip = val.as_str().and_then(|s| s.parse().ok());
+                                }
+                            }
+                            "mask" | "netmask" => {
+                                if out.netmask.is_none() {
+                                    out.netmask = val.as_str().and_then(|s| s.parse().ok());
+                                }
+                            }
+                            "dns" | "dns_list" | "dns_servers" => {
+                                if let Some(arr) = val.as_array() {
+                                    for d in arr {
+                                        if let Some(ip) = d.as_str().and_then(|s| s.parse().ok()) {
+                                            out.dns.push(ip);
+                                        }
+                                    }
+                                } else if let Some(ip) = val.as_str().and_then(|s| s.parse().ok()) {
+                                    out.dns.push(ip);
+                                }
+                            }
+                            _ => {}
+                        }
+                        walk(val, out);
+                    }
+                }
+                Value::Array(a) => {
+                    for item in a {
+                        walk(item, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(value, &mut out);
+        out
+    }
+}
+
 /// postlogin apps JSON（Ghidra T5 确认的字段集；jsoncpp 解析，缺省宽容）。
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct SiteConfig {

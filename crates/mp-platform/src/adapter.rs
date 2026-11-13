@@ -56,6 +56,19 @@ impl TunAdapter {
         Ok(Self { dev, name: cfg.name.clone(), mtu: cfg.mtu })
     }
 
+    /// 克隆设备句柄（供 pump_in/pump_out 双线程分别持读写端；Windows wintun
+    /// 后端不支持 clone，跨平台双端请用 `into_device` + tokio 异步网桥）。
+    #[cfg(not(target_os = "windows"))]
+    pub fn try_clone(&self) -> Result<Self, PlatformError> {
+        let dev = self.dev.try_clone().map_err(|e| PlatformError::Adapter(e.to_string()))?;
+        Ok(Self { dev, name: self.name.clone(), mtu: self.mtu })
+    }
+
+    /// 转为异步设备（tun "async" feature：AsyncDevice 实现 tokio AsyncRead/AsyncWrite）。
+    pub fn into_async_device(self) -> Result<tun::r#async::AsyncDevice, PlatformError> {
+        tun::r#async::AsyncDevice::new(self.dev).map_err(|e| PlatformError::Adapter(e.to_string()))
+    }
+
     /// 当前接口名（macOS 上可能与请求名不同，系统分配 utun{n}）。
     pub fn actual_name(&self) -> Result<String, PlatformError> {
         self.dev.name().map_err(|e| PlatformError::Adapter(e.to_string()))

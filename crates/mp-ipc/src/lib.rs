@@ -25,6 +25,17 @@ pub enum IpcError {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     Start { profile_id: String },
+    /// 免浏览器直连登录（内化登录）：凭据 + 手机 App 动态密保码。
+    /// 走 web 登录 → postlogin → /vpntunnel 全链路（对齐原版 an_vpn.js 参数流）。
+    Connect {
+        /// 门户主机（登录服务器，如 vpn.example.com）
+        host: String,
+        port: u16,
+        username: String,
+        password: String,
+        /// 手机 App 每分钟更新的动态密保码
+        code: String,
+    },
     Stop,
     Status,
     GetSession,

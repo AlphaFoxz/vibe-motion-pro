@@ -30,10 +30,12 @@ function renderStatic() {
   ($("server") as HTMLInputElement).placeholder = `vpn.example.com (${d.server})`;
   ($("username") as HTMLInputElement).placeholder = d.username;
   ($("password") as HTMLInputElement).placeholder = d.password;
+  ($("otp") as HTMLInputElement).placeholder = d.otp;
   $("btn-connect").textContent = d.connect;
   $("btn-disconnect").textContent = d.disconnect;
   $("session-label").textContent = d.session;
   $("server-ip-label").textContent = d.serverIp;
+  $("otp-label").textContent = d.otp;
   const sel = $("lang-select") as HTMLSelectElement;
   sel.innerHTML = LANGS.map((l) => `<option value="${l.value}">${l.label}</option>`).join("");
   sel.value = lang;
@@ -56,8 +58,15 @@ async function refresh() {
 }
 
 async function connect() {
-  const profile_id = ($("username") as HTMLInputElement).value || "default";
-  await invoke("vpn_start", { profileId: profile_id });
+  const host = ($("server") as HTMLInputElement).value.trim();
+  const username = ($("username") as HTMLInputElement).value.trim();
+  const password = ($("password") as HTMLInputElement).value;
+  const code = ($("otp") as HTMLInputElement).value.trim();
+  if (!host || !username || !password || !code) {
+    alert(t(lang).otp ? "请填写服务器 / 用户名 / 密码 / 动态密保" : "fill all fields");
+    return;
+  }
+  await invoke("vpn_connect", { host, port: 443, username, password, code });
   refresh();
 }
 
@@ -80,8 +89,9 @@ async function loadProfiles() {
       li.addEventListener("click", (ev) => {
         if ((ev.target as HTMLElement).classList.contains("del")) return;
         const id = (li as HTMLElement).dataset.id!;
-        ($("username") as HTMLInputElement).value = id;
-        connect().catch(alert);
+        invoke("vpn_start", { profileId: id })
+          .then(() => refresh())
+          .catch(alert);
       });
     });
     list.querySelectorAll("button.del").forEach((btn) => {

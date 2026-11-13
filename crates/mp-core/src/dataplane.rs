@@ -88,6 +88,36 @@ impl Adapter for ChannelAdapter {
     }
 }
 
+/// tokio mpsc 版通道适配器：内核网桥是异步任务（tun async feature），
+/// 与 std 版 `ChannelAdapter` 语义一致（try_recv/try_send，满丢不阻塞）。
+pub struct TokioChannelAdapter {
+    rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+}
+
+impl TokioChannelAdapter {
+    pub fn pair(
+        bound: usize,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (kernel_tx, rx) = tokio::sync::mpsc::channel(bound); // 内核 → 隧道
+        let (tx, kernel_rx) = tokio::sync::mpsc::channel(bound); // 隧道 → 内核
+        (Self { rx, tx }, kernel_tx, kernel_rx)
+    }
+}
+
+impl Adapter for TokioChannelAdapter {
+    fn read(&mut self) -> Option<Vec<u8>> {
+        self.rx.try_recv().ok()
+    }
+    fn write(&mut self, packet: &[u8]) {
+        let _ = self.tx.try_send(packet.to_vec());
+    }
+}
+
 /// 把 Adapter 包装成 smoltcp Device。
 struct AdapterDevice<'a> {
     adapter: &'a mut dyn Adapter,

@@ -64,9 +64,6 @@ impl TunnelIo {
 pub struct TunnelPump {
     pub task: JoinHandle<Result<(), mp_core::tunnel::PumpError>>,
     pub stop: Arc<AtomicBool>,
-    /// 内核侧：net_tx 给 pump_in 线程（内核→隧道），net_rx 给 pump_out 线程（隧道→内核）
-    pub net_tx: std::sync::mpsc::Sender<Vec<u8>>,
-    pub net_rx: std::sync::mpsc::Receiver<Vec<u8>>,
 }
 
 impl TunnelPump {
@@ -78,9 +75,23 @@ impl TunnelPump {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        let (tun, _net_tx, _net_rx) = ChannelAdapter::pair(256);
+        Self::spawn_with(stream, leftover, tun, keepalive_interval)
+    }
+
+    /// 用外部通道对组装（daemon 生产路径：内核侧端点由调用方交给 TunLink）。
+    pub fn spawn_with<S, A>(
+        mut stream: S,
+        leftover: Vec<u8>,
+        mut tun: A,
+        keepalive_interval: std::time::Duration,
+    ) -> Self
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+        A: mp_core::dataplane::Adapter + Send + 'static,
+    {
         use mp_core::frame::{PacketStream, TunnelKind};
-        use mp_core::tunnel::{pump_async, KeepaliveState, PumpError, TunnelStats};
-        let (mut tun, net_tx, net_rx) = ChannelAdapter::pair(256);
+        use mp_core::tunnel::{pump_async, KeepaliveState, TunnelStats};
         let mut demux = PacketStream::new();
         demux.feed(&leftover);
         let mut ka = KeepaliveState::new(keepalive_interval, mp_core::protocol::KEEPALIVE_MAX_ATTEMPTS, TunnelKind::Tcp);
@@ -97,7 +108,7 @@ impl TunnelPump {
             }
             pump_async(&mut stream, &mut tun, &mut demux, &mut ka, &mut stats, &stop2).await
         });
-        Self { task, stop, net_tx, net_rx }
+        Self { task, stop }
     }
 
     /// 优雅停止；返回泵的最终结果（Dead/Io 或正常 Ok）。
@@ -158,24 +169,61 @@ mod tests {
         });
 
         let pump = TunnelPump::spawn(client, Vec::new(), std::time::Duration::from_secs(30));
-        // 下行到达 TUN 通道
-        let down = pump.net_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        pump.shutdown().await.unwrap();
+        let _ = peer.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tunnel_pump_with_external_channels() {
+        use mp_core::dataplane::TokioChannelAdapter;
+        use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+
+        let (client, mut server) = duplex(64 * 1024);
+        let peer = tokio::spawn(async move {
+            let mut pkt = vec![0u8; 28];
+            pkt[0] = 0x45;
+            pkt[2..4].copy_from_slice(&28u16.to_be_bytes());
+            pkt[9] = 17;
+            server.write_all(&pkt).await.unwrap();
+            let mut buf = [0u8; 4096];
+            loop {
+                match server.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if server.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let (adapter, kernel_tx, mut kernel_rx) = TokioChannelAdapter::pair(64);
+        let pump = TunnelPump::spawn_with(client, Vec::new(), adapter, std::time::Duration::from_secs(30));
+        // 下行：内核通道收到包
+        let down = tokio::time::timeout(Duration::from_secs(2), kernel_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(down.len(), 28);
-        // 上行原样到隧道（回环回来）
+        // 上行：内核通道送包 → 隧道 → 回显 → 下行再收到
         let mut up = vec![0u8; 20];
         up[0] = 0x45;
         up[2..4].copy_from_slice(&20u16.to_be_bytes());
         up[9] = 6;
-        pump.net_tx.send(up.clone()).unwrap();
-        let echoed = pump.net_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        kernel_tx.send(up.clone()).await.unwrap();
+        let echoed = tokio::time::timeout(Duration::from_secs(2), kernel_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(echoed, up);
-        // 停止
         pump.shutdown().await.unwrap();
         let _ = peer.await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tunnel_pump_consumes_leftover_preamble() {
+        use mp_core::dataplane::TokioChannelAdapter;
         use tokio::io::duplex;
         // leftover：一个完整 28B IP 包 + 半个包（等流补齐 —— 这里不补，仅验证完整包送达）
         let mut pkt = vec![0u8; 28];
@@ -186,8 +234,12 @@ mod tests {
         leftover.extend_from_slice(&[0x45, 0, 0, 40]); // 40B 包的头 4 字节
 
         let (client, _server) = duplex(64 * 1024);
-        let pump = TunnelPump::spawn(client, leftover, std::time::Duration::from_secs(30));
-        let got = pump.net_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let (adapter, _kernel_tx, mut kernel_rx) = TokioChannelAdapter::pair(16);
+        let pump = TunnelPump::spawn_with(client, leftover, adapter, std::time::Duration::from_secs(30));
+        let got = tokio::time::timeout(Duration::from_secs(2), kernel_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got, pkt);
         pump.shutdown().await.unwrap();
     }

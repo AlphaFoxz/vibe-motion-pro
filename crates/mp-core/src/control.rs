@@ -27,6 +27,8 @@ pub enum ControlError {
     Protocol(#[from] ProtocolError),
     #[error("http status {0}")]
     HttpStatus(u16),
+    #[error("login rejected (no ANsession cookie)")]
+    AuthFailed,
     #[error("malformed response")]
     Malformed,
 }
@@ -207,16 +209,117 @@ impl ControlClient {
         Ok(resp.body)
     }
 
+    /// 步骤 2a：拉取登录验证码图片（HAR 实测 image/jpeg；uuid 关联本次验证码）。
+    /// 返回图片字节（UI 直接展示），Set-Cookie 自动入 session。
+    pub async fn fetch_captcha(&self, session: &mut Session, uuid: &str) -> Result<Vec<u8>, ControlError> {
+        let mut stream = self.connect_tls().await?;
+        let path = format!("{}?d={}&uuid={}", crate::protocol::CAPTCHA_PATH, now_ms(), uuid);
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: Keep-Alive\r\n",
+            self.host
+        );
+        stream.write_all(req.as_bytes()).await?;
+        let (head, body) = Self::read_response_raw(&mut stream).await?;
+        let resp = parse_response(&head)?;
+        for c in resp.set_cookies() {
+            if !session.cookies.contains(&c) {
+                session.cookies.push(c);
+            }
+        }
+        if resp.status != 200 {
+            return Err(ControlError::HttpStatus(resp.status));
+        }
+        Ok(body)
+    }
+
+    /// 步骤 2b：提交登录（用户名/密码/动态验证码 → ANsession cookie）。
+    /// HAR + 用户实测字段：t=t&userCode=...&pwd=...&code=...
+    pub async fn login(
+        &self,
+        session: &mut Session,
+        form: &crate::protocol::LoginFormData,
+    ) -> Result<(), ControlError> {
+        let mut stream = self.connect_tls().await?;
+        let body = form.to_form_urlencoded();
+        let cookie_hdr = if session.cookies.is_empty() {
+            String::new()
+        } else {
+            format!("Cookie: {}\r\n", session.cookies.join("; "))
+        };
+        let req = format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/x-www-form-urlencoded\r\n\
+             Content-Length: {}\r\nConnection: Keep-Alive\r\n{cookie_hdr}\r\n{body}",
+            crate::protocol::LOGIN_SUBMIT_PATH,
+            self.host,
+            body.len()
+        );
+        stream.write_all(req.as_bytes()).await?;
+        let (head, _body) = Self::read_response_raw(&mut stream).await?;
+        let resp = parse_response(&head)?;
+        for c in resp.set_cookies() {
+            if !session.cookies.contains(&c) {
+                session.cookies.push(c);
+            }
+        }
+        // 失败形态未抓包确认：宽容处理 —— 200/302 且种下会话 cookie 即视为成功
+        let has_an = session.cookies.iter().any(|c| c.starts_with("ANsession"));
+        match resp.status {
+            200 | 302 if has_an => Ok(()),
+            200 | 302 => Err(ControlError::AuthFailed),
+            other => Err(ControlError::HttpStatus(other)),
+        }
+    }
+
+    /// 读完整响应：返回 (头字节, 体字节)。按 Content-Length 精确读取（支持二进制体）。
+    async fn read_response_raw(
+        stream: &mut tokio_rustls::client::TlsStream<TcpStream>,
+    ) -> Result<(Vec<u8>, Vec<u8>), ControlError> {
+        let mut buf = Vec::with_capacity(4096);
+        let mut chunk = [0u8; 4096];
+        let head_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(ControlError::Malformed);
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        let clen: usize = parse_response(&buf[..head_end])?
+            .header("content-length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        while buf.len() < head_end + clen {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok((buf[..head_end].to_vec(), buf[head_end..].to_vec()))
+    }
+
     /// 数据隧道建立（Ghidra T2/T3：/vpntunnel 握手 → 同连接切二进制 → 16B 配置帧）。
     ///
-    /// 返回 (进入数据模式的 TLS 流, 服务端 'Q' 通用配置 JSON 载荷, 握手阶段一并到达的剩余字节)。
-    /// 剩余字节属数据模式先导，调用方应灌入 PacketStream（同一 record 常含配置帧+首个数据包）。
+    /// 流程：GET → 200/201 → 'P'→'Q'（通用配置）→ 'T'→'U'（网络配置：虚拟 IP/DNS）。
+    /// 返回 (数据模式流, 'Q' 配置 JSON, 'U' 网络配置, 先导字节)。
     /// - 200 = 二进制模式（本流程）；201 = JSON 协议（暂按二进制头继续）
     /// - 302 Redirect = 拒绝
     pub async fn open_tunnel(
         &self,
         params: &crate::protocol::TunnelOpenParams<'_>,
-    ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<u8>, Vec<u8>), ControlError> {
+        local_ips: &[[u8; 4]],
+        mac: &[u8; 6],
+    ) -> Result<
+        (
+            tokio_rustls::client::TlsStream<TcpStream>,
+            Vec<u8>,
+            crate::protocol::NetworkConfig,
+            Vec<u8>,
+        ),
+        ControlError,
+    > {
         use crate::protocol::{
             decode_config_frame, encode_config_frame, vpntunnel_request, ConfigMsgType,
         };
@@ -249,13 +352,16 @@ impl ControlClient {
         // 二进制模式：发 'P' 请求 → 循环补读直到一个完整 'Q' 通用配置帧
         stream.write_all(&encode_config_frame(ConfigMsgType::Request, b"")).await?;
         let mut pending = buf[head_end..].to_vec(); // 201 的 body 或服务端抢先发的帧
+        let common_payload;
         loop {
             if let Some(res) = decode_config_frame(&pending) {
                 let (kind, payload, used) = res.map_err(|_| ControlError::Malformed)?;
                 if kind != ConfigMsgType::CommonConfig {
                     return Err(ControlError::Malformed);
                 }
-                return Ok((stream, payload, pending[used..].to_vec()));
+                common_payload = payload;
+                pending.drain(..used);
+                break;
             }
             let n = stream.read(&mut chunk).await?;
             if n == 0 {
@@ -263,14 +369,46 @@ impl ControlClient {
             }
             pending.extend_from_slice(&chunk[..n]);
         }
+
+        // 'T' 网络配置请求（本机 IP 列表 + MAC）→ 'U' 响应（虚拟 IP/DNS）
+        stream
+            .write_all(&crate::protocol::network_config_request(local_ips, mac))
+            .await?;
+        let mut netcfg = crate::protocol::NetworkConfig::default();
+        loop {
+            if let Some(res) = decode_config_frame(&pending) {
+                let (kind, payload, used) = res.map_err(|_| ControlError::Malformed)?;
+                if kind != ConfigMsgType::NetworkConfig {
+                    // 非 'U' 帧（顺序差异/额外推送）——跳过继续等
+                    pending.drain(..used);
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                    netcfg = crate::protocol::NetworkConfig::from_json(&v);
+                }
+                pending.drain(..used);
+                return Ok((stream, common_payload, netcfg, pending));
+            }
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                // 对端直接进入数据模式：无 'U' 也可用（虚拟 IP 由调用方缺省处理）
+                return Ok((stream, common_payload, netcfg, pending));
+            }
+            pending.extend_from_slice(&chunk[..n]);
+        }
     }
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 /// 骨架阶段：不校验服务器证书。
 #[derive(Debug)]
-struct NoVerify;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerify {
+struct NoVerify;impl rustls::client::danger::ServerCertVerifier for NoVerify {
     fn verify_server_cert(
         &self,
         _end_entity: &rustls::pki_types::CertificateDer<'_>,
@@ -466,15 +604,26 @@ mod tests {
                     assert!(req.contains("appid: SSPVPN"));
                     // 2. 200 切二进制
                     tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
-                    // 3. 读 16B 'P' 帧
+                    // 3. 读 16B 'P' 帧 → 回 'Q' 配置帧（JSON 载荷）
                     let mut frame = [0u8; 16];
                     tls.read_exact(&mut frame).await.unwrap();
                     assert_eq!(frame[0], b'P');
-                    // 4. 回 'Q' 配置帧（JSON 载荷）
                     let cfg_json = br#"{"mtu":1400}"#;
-                    let mut resp = crate::protocol::encode_config_frame(
+                    tls.write_all(&crate::protocol::encode_config_frame(
                         crate::protocol::ConfigMsgType::CommonConfig,
                         cfg_json,
+                    ))
+                    .await
+                    .unwrap();
+                    // 4. 读 48B 'T' 网络配置请求 → 回 'U'（虚拟 IP/DNS）
+                    let mut treq = [0u8; 48];
+                    tls.read_exact(&mut treq).await.unwrap();
+                    assert_eq!(treq[0], b'T');
+                    assert_eq!(treq[12], 32);
+                    let net_json = br#"{"virip":"10.8.0.2","mask":"255.255.255.0","dns":["10.8.0.1"]}"#;
+                    let mut resp = crate::protocol::encode_config_frame(
+                        crate::protocol::ConfigMsgType::NetworkConfig,
+                        net_json,
                     );
                     // 5. 紧跟一个下行裸 IP 包（数据模式）
                     let mut pkt = vec![0u8; 28];
@@ -505,18 +654,27 @@ mod tests {
         let port = spawn_tunnel_mock().await;
         let client =
             ControlClient::new("vpn.example.com", port, true).unwrap().with_connect_addr("127.0.0.1", port);
-        let (mut stream, cfg, leftover) = client
-            .open_tunnel(&crate::protocol::TunnelOpenParams {
-                cookie: "sid=s1",
-                dev_type: 1,
-                client_id: "cid",
-                cpu_id: "cpu",
-                hostname: "PC",
-                ipv6: false,
-            })
+        let (mut stream, cfg, netcfg, leftover) = client
+            .open_tunnel(
+                &crate::protocol::TunnelOpenParams {
+                    cookie: "sid=s1",
+                    dev_type: 1,
+                    client_id: "cid",
+                    cpu_id: "cpu",
+                    hostname: "PC",
+                    ipv6: false,
+                },
+                &[[192, 168, 1, 10]],
+                &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            )
             .await
             .unwrap();
         assert_eq!(cfg, br#"{"mtu":1400}"#.to_vec());
+        assert_eq!(
+            netcfg.virtual_ip.map(|i| i.to_string()).as_deref(),
+            Some("10.8.0.2")
+        );
+        assert_eq!(netcfg.dns.len(), 1);
 
         // 数据模式先导：leftover 里应有服务端随配置帧同 record 发来的裸 IP 包
         let mut wire_bytes = leftover;
@@ -549,9 +707,107 @@ mod tests {
         let client =
             ControlClient::new("vpn.example.com", port, true).unwrap().with_connect_addr("127.0.0.1", port);
         let err = client
-            .open_tunnel(&crate::protocol::TunnelOpenParams::default())
+            .open_tunnel(
+                &crate::protocol::TunnelOpenParams::default(),
+                &[],
+                &[0, 0, 0, 0, 0, 0],
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ControlError::HttpStatus(302)));
+    }
+
+    // ---- 免浏览器登录流（验证码 + 登录提交） ----
+
+    /// 二进制 mock：getImage 回 JPEG 字节；login 校验表单后种 ANsession。
+    async fn spawn_weblogin_mock() -> u16 {
+        use tokio::net::TcpListener;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use tokio_rustls::TlsAcceptor;
+
+        let cert = rcgen::generate_simple_self_signed(vec!["vpn.example.com".into()]).unwrap();
+        let key_der = PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into());
+        let cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(cert.cert)], key_der)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(cfg));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let Ok(mut tls) = acceptor.accept(sock).await else { return };
+                    let mut buf = vec![0u8; 8192];
+                    let Ok(n) = tls.read(&mut buf).await else { return };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if req.starts_with("GET /restservice/vpnLogin/getImage") {
+                        let img: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9]; // 假 JPEG
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\
+                             Set-Cookie: captcha_uuid=u1; Path=/\r\n\r\n",
+                            img.len()
+                        );
+                        tls.write_all(resp.as_bytes()).await.unwrap();
+                        tls.write_all(img).await.unwrap();
+                    } else if req.starts_with("POST /restservice/vpnLogin/login") {
+                        assert!(req.contains("Content-Type: application/x-www-form-urlencoded"));
+                        let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                        assert!(body.contains("t=t&userCode=example_user&pwd=p%40ss&code=1234"), "form: {body}");
+                        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\
+                                    Set-Cookie: ANsession1716635751154266=abc; Path=/\r\n\r\n";
+                        tls.write_all(resp.as_bytes()).await.unwrap();
+                    } else {
+                        tls.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn web_login_captcha_and_submit() {
+        let port = spawn_weblogin_mock().await;
+        let client =
+            ControlClient::new("vpn.example.com", port, true).unwrap().with_connect_addr("127.0.0.1", port);
+        let mut session = Session::default();
+
+        // 1. 验证码：二进制图片字节 + cookie 捕获
+        let img = client.fetch_captcha(&mut session, "u1").await.unwrap();
+        assert_eq!(img, vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9]);
+        assert!(session.cookies.contains(&"captcha_uuid=u1".to_string()));
+
+        // 2. 登录提交：ANsession 种下
+        let form = crate::protocol::LoginFormData {
+            t: "t".into(),
+            user_code: "example_user".into(),
+            pwd: "p@ss".into(),
+            code: "1234".into(),
+        };
+        client.login(&mut session, &form).await.unwrap();
+        assert!(session.cookies.iter().any(|c| c.starts_with("ANsession")));
+    }
+
+    #[tokio::test]
+    async fn web_login_rejected_without_ansession() {
+        let port = spawn_mock_tls(Arc::new(|_| {
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".into() // 无 Set-Cookie
+        }))
+        .await;
+        let client =
+            ControlClient::new("vpn.example.com", port, true).unwrap().with_connect_addr("127.0.0.1", port);
+        let mut session = Session::default();
+        let form = crate::protocol::LoginFormData {
+            t: "t".into(),
+            user_code: "u".into(),
+            pwd: "p".into(),
+            code: "1".into(),
+        };
+        let err = client.login(&mut session, &form).await.unwrap_err();
+        assert!(matches!(err, ControlError::AuthFailed));
     }
 }
