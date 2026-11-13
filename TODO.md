@@ -36,8 +36,11 @@
 
 ### 阶段1 工程骨架
 
-- [ ] 建立 monorepo 与 CI（三平台构建 + 代码签名）
-- [ ] 版本管理、协议文档、ADR 记录入库（这次做好备份策略，避免仓库再次丢失）
+- [x] 建立 monorepo：crates/{mp-core,mp-daemon,mp-platform,mp-ipc} 已创建并编译通过（cargo check OK）
+- [ ] 安装 Windows 10 SDK（VS Installer），恢复 MSVC 工具链（Tauri 构建必需）
+- [ ] 初始化 Tauri 2 app（app/ 目录，见 app/README.md 初始化步骤）
+- [x] CI（.github/workflows/ci.yml，三平台 cargo check/test；Tauri 构建待 SDK 就绪后加入）
+- [x] 版本管理已 init + 首次提交；做好备份策略（后续推远端双备份）
 
 ### 阶段2 协议与隧道实现
 
