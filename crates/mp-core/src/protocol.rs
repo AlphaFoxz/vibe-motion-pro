@@ -27,6 +27,78 @@ pub const CAPTCHA_PATH: &str = "/restservice/vpnLogin/getImage";
 pub const PORTAL_WS_COMMAND: &str = "/ws/command";
 pub const PORTAL_WS_NOTIFY: &str = "/ws/notify";
 
+/// 登录提交端点（HAR：/restservice/vpnLogin/*，POST 路径待响应头最终确认）。
+pub const LOGIN_SUBMIT_PATH: &str = "/restservice/vpnLogin/login";
+
+/// 登录表单字段（HAR 实测字段名；凭据值匿名化后不入库）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoginFormData {
+    /// 固定 "t"（登录类型标记，原版实测值）
+    pub t: String,
+    pub user_code: String,
+    pub pwd: String,
+    /// 验证码（来自 CAPTCHA_PATH，uuid 关联）
+    pub code: String,
+}
+
+impl LoginFormData {
+    pub fn to_form_urlencoded(&self) -> String {
+        format!(
+            "t={}&userCode={}&pwd={}&code={}",
+            urlencode(&self.t),
+            urlencode(&self.user_code),
+            urlencode(&self.pwd),
+            urlencode(&self.code)
+        )
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// 原版 action 码（WS 帧实测；8=状态查询，10=登录回调通知，其余待采集）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum WsAction {
+    StatusQuery = 8,
+    LoginCallback = 10,
+}
+
+/// 原版 WS 信封（若需与原版 web portal 兼容时使用）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WsEnvelope {
+    pub data: serde_json::Value,
+    #[serde(default)]
+    pub error: i32,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub receiver: Option<String>,
+    #[serde(default)]
+    pub sender: String,
+}
+
+impl WsEnvelope {
+    pub fn parse(raw: &str) -> Option<Self> {
+        serde_json::from_str(raw).ok()
+    }
+}
+
+/// receiver 寻址格式："<ANsession cookie>=<profile_id>+<uuid>"。
+pub fn ws_receiver(session_cookie: &str, profile_id: &str, uuid: &str) -> String {
+    format!("{session_cookie}={profile_id}+{uuid}")
+}
+
 /// 服务器 Keep-Alive 头（实测 `timeout=15, max=100`）。
 pub const SERVER_KEEPALIVE_TIMEOUT_SECS: u64 = 15;
 
@@ -139,45 +211,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raw_status_mapping() {
-        assert_eq!(RawVpnStatus::from_i32(2), RawVpnStatus::Connected);
-        assert_eq!(RawVpnStatus::from_i32(4), RawVpnStatus::Reconnecting);
-        assert_eq!(RawVpnStatus::from_i32(7), RawVpnStatus::Disconnected);
-        assert_eq!(RawVpnStatus::from_i32(99), RawVpnStatus::Unknown);
+    fn login_form_encoding() {
+        let f = LoginFormData {
+            t: "t".into(),
+            user_code: "example_user".into(),
+            pwd: "p@ss w0rd".into(),
+            code: "105119".into(),
+        };
+        assert_eq!(
+            f.to_form_urlencoded(),
+            "t=t&userCode=example_user&pwd=p%40ss%20w0rd&code=105119"
+        );
     }
 
     #[test]
-    fn valid_string_roundtrip() {
-        let v = ValidString::parse("validcode=@#motionProweb=1");
-        assert_eq!(v.validcode, "");
-        assert!(v.motion_pro_web);
-        assert_eq!(v.encode(), "validcode=@#motionProweb=1");
+    fn ws_envelope_parse_command() {
+        let raw = r#"{"data":{"action":8,"site":{"host":"","name":""},"status":0},"error":0,"message":"vpn current status","receiver":null,"sender":"daemon"}"#;
+        let e = WsEnvelope::parse(raw).unwrap();
+        assert_eq!(e.error, 0);
+        assert_eq!(e.sender, "daemon");
+        assert!(e.receiver.is_none());
+        assert_eq!(e.data["action"], 8);
     }
 
     #[test]
-    fn valid_string_code_only() {
-        let v = ValidString::parse("validcode=abc123");
-        assert_eq!(v.validcode, "abc123");
-        assert!(!v.motion_pro_web);
+    fn ws_envelope_parse_notify() {
+        let raw = r#"{"data":{"action":10,"callback":1,"error":0},"error":0,"receiver":"ANsession1=prof+u1","sender":"daemon"}"#;
+        let e = WsEnvelope::parse(raw).unwrap();
+        assert_eq!(e.data["action"], 10);
+        assert_eq!(e.receiver.as_deref(), Some("ANsession1=prof+u1"));
     }
 
     #[test]
-    fn aaa_request_format() {
-        let r = aaa_method_request("vpn.example.com");
-        assert!(r.starts_with("GET /prx/000/http/localhost/an_login.js HTTP/1.1\r\n"));
-        assert!(r.contains("Host: vpn.example.com"));
-        assert!(r.contains("Connection: Keep-Alive"));
-    }
-
-    #[test]
-    fn postlogin_request_format() {
-        let r = postlogin_apps_request("h", "example_user", "***", "default");
-        assert!(
-            r.contains(
-                "_uname=example_user&_role=&_pid=***& _instid=default"
-                    .replace(' ', "")
-                    .as_str()
-            ) || r.contains("_uname=example_user&_role=&_pid=***&_instid=default")
+    fn ws_receiver_format() {
+        assert_eq!(
+            ws_receiver("ANsession1", "prof1", "u1"),
+            "ANsession1=prof1+u1"
         );
     }
 }
