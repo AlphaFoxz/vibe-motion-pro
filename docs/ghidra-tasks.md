@@ -1,5 +1,10 @@
 # Ghidra 逆向任务清单（数据帧格式攻坚）
 
+> **自动化流水线（2026-11-14 起）**：Ghidra 12.2 headless 全自动分析，无需人工 GUI 操作。
+> - 工具：`D:\tools\ghidra_scripts\DumpAnchors.java` + `run-ghidra-dump.ps1`（JDK 25 便携版在 `D:\tools\jdk-25*`）
+> - 用法：`powershell -File D:\tools\ghidra_scripts\run-ghidra-dump.ps1 -Binary <dll路径> [-Anchors "a,b"]`
+> - 产物：`docs/decomp/<名>.c`（锚点函数 + 一层 caller/callee 的伪 C）
+
 样本：`reference/binaries/`（不入库，内部存储）。本地路径 `reference/binaries/vl3vpn.dll` 等。
 使用 Ghidra 打开时建议先跑自动分析（默认即可）。
 
@@ -35,7 +40,23 @@
      - [ ] keepalive 间隔常量（实测 ≈200ms，找硬编码值）
      - [ ] 服务端回应（101B record）的判断逻辑
 - 结论：
-  - （待填）
+  - **帧为 20 字节（0x14）定长明文，经 SSL_write 写入 TLS 隧道**（函数 FUN_10063d70 @ vl3vpn.dll，l3vpn.c 行 0x4e2）：
+    | 偏移 | 大小 | 值 | 含义 |
+    |---|---|---|---|
+    | 0 | 4 | `45 00 00 14` | 0x45 类型标记 + BE 长度 0x0014（=20，自指总长）|
+    | 4 | 4 | 0 | 保留/序号（置 0）|
+    | 8 | 4 | `00 ff 00 00` | 命令 0xff00（keepalive 操作码）|
+    | 12 | 2 | `00 01` (BE) | 版本/计数 = 1 |
+    | 14 | 4 | 毫秒数 | 当日时间戳（秒×1000+毫秒，GetLocalTime）|
+    | 18 | 2 | 0 / 2 | 隧道类型（2 = WG 隧道 keepalive）|
+  - **间隔与重试**：select 循环（FUN_100640d0，l3vpn.c 行 0x54c 起）
+    - 默认 30s（0x1e），会话字段钳制 [1,60]；注册表 `HKLM\SOFTWARE\VPN\Keepalive\SendInterval` 可覆盖（1-60）
+    - 无响应 `AttemptMaxTimes`（默认 3，上限 300）个周期后重连（TCP 错误码 0x32，UDP 0x79）
+    - select 超时 1s；send 次数写 `HKCU\...\Keepalive\L3TCPTunnel`（Running/SendTimes/TimeofLatestSend）
+  - **重要修正**：源码级 keepalive 是 30s 间隔、20B 明文，**与 pktmon 实测的 ~200ms/85B 外层 record 不符** —— 200ms 流量应为别的帧（待查），85B 与 20B 明文 + TLS 1.2 开销需重新对齐；实测锚点需修正后再用于自检
+  - 发送成功后维护两个计数器（包数/字节数）
+  - 反编译产物：`docs/decomp/vl3vpn.c`（select 循环 FUN_100640d0、隧道主线程 FUN_10066250——其中可见 `validcode=`、`motionProweb=1`、`L4Connected=1`、`CustomDNS=` 连接串解析，T2/T5 素材）
+  - [x] 心跳报文长度/结构；[x] 时间戳字段；[x] keepalive 间隔常量（30s 默认，非 200ms）
 
 ## T2 /vpntunnel 隧道建立
 
