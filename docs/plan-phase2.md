@@ -27,7 +27,7 @@
 - [x] TODO(逆向)：`GET %s/vpntunnel HTTP/1.1` 握手报文格式、cookie/session 字段映射
 
 ### E4 数据面（mp-core::dataplane）
-- [ ] smoltcp 接入：虚拟网卡读写 ↔ smoltcp Interface
+- [x] smoltcp 接入（Adapter trait + MockAdapter + smoltcp Device 桥接）：虚拟网卡读写 ↔ smoltcp Interface
 - [ ] TCP/UDP 会话分流与 NAT 表
 - [ ] 待 Windows SDK/真实网卡后做端到端测试，本步先接口 + 假适配器测试
 

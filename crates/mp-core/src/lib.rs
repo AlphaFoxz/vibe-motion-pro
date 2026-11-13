@@ -1,6 +1,7 @@
 //! mp-core: MotionPro 协议核心。
 //! 模块划分见 docs/plan-phase2.md。
 
+pub mod dataplane;
 pub mod engine;
 pub mod error;
 pub mod frame;
