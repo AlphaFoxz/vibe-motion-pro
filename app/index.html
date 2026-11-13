@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>MotionPro</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>MotionPro</h1>
+        <span id="status-badge" class="badge disconnected">未连接</span>
+      </header>
+
+      <main>
+        <section id="login-panel">
+          <label>服务器 <input id="server" placeholder="vpn.example.com" /></label>
+          <label>用户名 <input id="username" /></label>
+          <label>密码 <input id="password" type="password" /></label>
+          <button id="btn-connect">连接</button>
+          <button id="btn-disconnect">断开</button>
+        </section>
+
+        <section id="session-info">
+          <div>会话：<span id="session-id">-</span></div>
+          <div>服务器 IP：<span id="server-ip">-</span></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

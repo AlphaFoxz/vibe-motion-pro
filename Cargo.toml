@@ -6,6 +6,7 @@ members = [
     "crates/mp-platform",
     "crates/mp-ipc",
 ]
+exclude = ["app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
