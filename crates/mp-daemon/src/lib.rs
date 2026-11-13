@@ -154,13 +154,19 @@ pub async fn connect_with_login(
         std::time::Duration::from_secs(mp_core::protocol::KEEPALIVE_INTERVAL_SECS),
     );
     // TUN 接线失败（无管理员/wintun）→ 降级：隧道照常，仅无本地转发
+    // include 路由（'U' 解析的 split tunnel 网段 → CIDR 前缀形式交给 RouteManager）
+    let include_routes: Vec<String> = netcfg
+        .include_routes
+        .iter()
+        .filter_map(|(ip, m)| mask_to_prefix(m).map(|p| format!("{ip}/{p}")))
+        .collect();
     let tun = match tunsetup::TunLink::bring_up(
         kernel_tx,
         kernel_rx,
         netcfg.virtual_ip,
         netcfg.netmask,
         netcfg.dns.clone(),
-        &[],
+        &include_routes,
     )
     .await
     {
@@ -203,6 +209,17 @@ fn login_err(stage: &str, e: &mp_core::control::ControlError) -> String {
             format!("{stage}: 登录被拒绝（用户名/密码/动态密保错误）")
         }
         other => format!("{stage}: {other}"),
+    }
+}
+
+/// 点分掩码 → CIDR 前缀长度（非连续掩码返回 None）。
+fn mask_to_prefix(mask: &std::net::Ipv4Addr) -> Option<u8> {
+    let bits = u32::from(*mask);
+    let prefix = bits.leading_ones() as u8;
+    if prefix == 32 || (bits << prefix) == 0 {
+        Some(prefix)
+    } else {
+        None
     }
 }
 

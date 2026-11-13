@@ -45,6 +45,10 @@ pub enum KeepaliveVerdict {
 }
 
 impl KeepaliveState {
+    pub fn misses(&self) -> u32 {
+        self.attempts
+    }
+
     pub fn new(interval: Duration, max_attempts: u32, kind: TunnelKind) -> Self {
         Self {
             interval,
@@ -211,6 +215,9 @@ where
     use tokio::time::{sleep, Duration as TokioDuration};
     stream_demux.feed(&[]); // no-op，保留接口对称
     let mut chunk = [0u8; 16_384];
+    let mut last_log = std::time::Instant::now();
+    let mut tun_pkts_logged = 0u32;
+    let mut wire_pkts_logged = 0u32;
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -222,10 +229,43 @@ where
                     Ok(0) => return Err(PumpError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "tunnel closed"))),
                     Ok(n) => {
                         stats.bytes_in += n as u64;
+                        if wire_pkts_logged < 3 {
+                            tracing::debug!(
+                                "wire->tun: +{n}B head={:02X?}",
+                                &chunk[..n.min(24)]
+                            );
+                            wire_pkts_logged += 1;
+                        }
                         stream_demux.feed(&chunk[..n]);
                         while let Some(item) = stream_demux.next_item()? {
                             match item {
                                 StreamItem::IpPacket(pkt) => {
+                                    if pkt.first() == Some(&0x45) && pkt.len() > 28 {
+                                        let mut extra = String::new();
+                                        if pkt[9] == 1 && pkt.len() >= 21 {
+                                            // ICMP：type/code + 嵌入的原始包头（错误帧带回触发包前 28B）
+                                            extra = format!(" icmp_type={} code={}", pkt[20], pkt[21]);
+                                            if pkt.len() >= 48 && (pkt[20] == 11 || pkt[20] == 3) {
+                                                let em = &pkt[28..];
+                                                if em.len() >= 20 {
+                                                    extra.push_str(&format!(
+                                                        " embedded=({}.{}.{}.{} -> {}.{}.{}.{} proto={} tl={})",
+                                                        em[12], em[13], em[14], em[15],
+                                                        em[16], em[17], em[18], em[19],
+                                                        em[9],
+                                                        u16::from_be_bytes([em[2], em[3]])
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        tracing::debug!(
+                                            "wire->tun IPv4: {}B src={}.{}.{}.{} dst={}.{}.{}.{} proto={}{}",
+                                            pkt.len(),
+                                            pkt[12], pkt[13], pkt[14], pkt[15],
+                                            pkt[16], pkt[17], pkt[18], pkt[19],
+                                            pkt[9], extra
+                                        );
+                                    }
                                     tun.write(&pkt);
                                     stats.packets_in += 1;
                                 }
@@ -239,8 +279,21 @@ where
             }
             _ = sleep(TokioDuration::from_millis(POLL_MS)) => {}
         }
-        // 2) TUN → 隧道（裸 IP 直传）
+        // 2) TUN → 隧道（裸 IP 直传）；只记单播数据包（组播/广播是噪音）
         while let Some(pkt) = tun.read() {
+            if pkt.first() == Some(&0x45)
+                && pkt[16..20] != [224, 0, 0, 0] /*非组播*/
+                && !(pkt[16] >= 224)
+                && pkt[16..20] != [10, 91, 95, 255]
+            {
+                tracing::debug!(
+                    "tun->wire IPv4: {}B src={}.{}.{}.{} dst={}.{}.{}.{} proto={}",
+                    pkt.len(),
+                    pkt[12], pkt[13], pkt[14], pkt[15],
+                    pkt[16], pkt[17], pkt[18], pkt[19],
+                    pkt[9]
+                );
+            }
             stream.write_all(&pkt).await?;
             stats.packets_out += 1;
             stats.bytes_out += pkt.len() as u64;
@@ -254,6 +307,15 @@ where
             }
             KeepaliveVerdict::Dead => return Err(PumpError::Dead),
             KeepaliveVerdict::Alive => {}
+        }
+        // 4) 周期观测日志
+        if last_log.elapsed() >= std::time::Duration::from_secs(10) {
+            tracing::debug!(
+                "tunnel stats: in={}pkt/{}B out={}pkt/{}B ka_sent={} ka_misses={}",
+                stats.packets_in, stats.bytes_in, stats.packets_out, stats.bytes_out,
+                stats.keepalives_sent, ka.misses()
+            );
+            last_log = std::time::Instant::now();
         }
     }
 }

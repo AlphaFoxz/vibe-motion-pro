@@ -34,19 +34,59 @@ pub fn validate_ip(ip: &str) -> Result<String, RouteError> {
         .map_err(|_| RouteError::InvalidIp(ip.to_string()))
 }
 
-/// Windows 路由命令：`route add <cidr> <gateway> metric <n>`。
-pub fn windows_route_add(cidr: &str, gateway: &str, metric: u16) -> Result<Vec<String>, RouteError> {
+/// Windows 路由命令：`route add <addr> mask <mask> <gw> metric <n> if <idx>`。
+/// 注意：
+/// - addr/mask 必须是独立参数——合并成一个带空格的参数会被引号包裹，
+///   route.exe 解析失败但**退出码仍为 0**（真机踩坑：静默无路由）。
+/// - 必须显式 `if <idx>`——wintun IP 注册有竞态，缺省时 Windows 可能把网关
+///   解析到物理网卡上（真机踩坑：路由落在 WLAN 接口，包全被 WLAN 网关拒收）。
+pub fn windows_route_add(
+    cidr: &str,
+    gateway: &str,
+    metric: u16,
+    if_index: Option<u32>,
+) -> Result<Vec<String>, RouteError> {
     let (addr, prefix) = validate_cidr(cidr)?;
     let gw = validate_ip(gateway)?;
     let mask = prefix_to_mask(prefix);
-    Ok(vec![
-        "route".into(),
-        "add".into(),
-        format!("{addr} mask {mask}"),
+    let mut argv = vec![
+        "route".to_string(),
+        "add".to_string(),
+        addr,
+        "mask".to_string(),
+        mask,
         gw,
-        "metric".into(),
+        "metric".to_string(),
         metric.to_string(),
-    ])
+    ];
+    if let Some(idx) = if_index {
+        argv.push("if".to_string());
+        argv.push(idx.to_string());
+    }
+    Ok(argv)
+}
+
+/// 解析适配器接口索引：`route print` 头部接口列表（"  16 ... mp-tun ..."）。
+/// 直接调系统命令，不依赖 runner（探针/测试也安全，失败返回 None）。
+pub fn windows_if_index(interface: &str) -> Option<u32> {
+    let out = std::process::Command::new("route")
+        .arg("print")
+        .output()
+        .ok()?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // 接口列表段：每行 "  索引 ... 适配器名"
+    for line in text.lines() {
+        if line.contains(interface) {
+            if let Some(idx) = line.split_whitespace().next().and_then(|t| t.parse().ok()) {
+                return Some(idx);
+            }
+        }
+    }
+    None
 }
 
 /// Windows 删除路由。
@@ -156,12 +196,17 @@ mod tests {
 
     #[test]
     fn windows_route_add_format() {
-        let cmd = windows_route_add("10.3.130.0/24", "10.91.16.1", 25).unwrap();
+        let cmd = windows_route_add("10.3.130.0/24", "10.91.16.1", 25, Some(16)).unwrap();
         assert_eq!(
             cmd.join(" "),
+            "route add 10.3.130.0 mask 255.255.255.0 10.91.16.1 metric 25 if 16"
+        );
+        let no_if = windows_route_add("10.3.130.0/24", "10.91.16.1", 25, None).unwrap();
+        assert_eq!(
+            no_if.join(" "),
             "route add 10.3.130.0 mask 255.255.255.0 10.91.16.1 metric 25"
         );
-        assert!(windows_route_add("bad/24", "10.91.16.1", 25).is_err());
+        assert!(windows_route_add("bad/24", "10.91.16.1", 25, None).is_err());
     }
 
     #[test]

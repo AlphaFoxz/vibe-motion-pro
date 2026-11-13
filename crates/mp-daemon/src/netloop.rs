@@ -94,7 +94,13 @@ impl TunnelPump {
         use mp_core::tunnel::{pump_async, KeepaliveState, TunnelStats};
         let mut demux = PacketStream::new();
         demux.feed(&leftover);
-        let mut ka = KeepaliveState::new(keepalive_interval, mp_core::protocol::KEEPALIVE_MAX_ATTEMPTS, TunnelKind::Tcp);
+        // TCP 隧道心跳 ~200ms（原版 pktmon 实测 49.6s 内 220 个心跳 ≈ 4.4/s；
+        // 服务器 15s 无心跳判死）。miss 上限 225 次 ≈ 45s 无任何数据才判死。
+        let mut ka = KeepaliveState::new(
+            std::time::Duration::from_millis(200),
+            225,
+            TunnelKind::Tcp,
+        );
         let mut stats = TunnelStats::default();
         let stop = Arc::new(AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);

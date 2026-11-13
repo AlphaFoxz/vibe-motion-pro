@@ -463,6 +463,7 @@ impl ControlClient {
     > {
         use crate::protocol::{
             decode_config_frame, encode_config_frame, vpntunnel_request, ConfigMsgType,
+            CONFIG_FRAME_HEADER_LEN,
         };
         let mut stream = self.connect_tls().await?;
         let req = vpntunnel_request(&self.host, params);
@@ -484,9 +485,22 @@ impl ControlClient {
             }
         }
         let resp = parse_response(&buf[..head_end])?;
+        tracing::debug!(
+            "vpntunnel resp: status={} headers={:?} leftover={}B",
+            resp.status,
+            String::from_utf8_lossy(&buf[..head_end])
+                .lines()
+                .skip(1)
+                .take(8)
+                .collect::<Vec<_>>(),
+            buf.len() - head_end
+        );
         match resp.status {
             200 | 201 => {}
-            302 => return Err(ControlError::HttpStatus(302)),
+            302 => {
+                tracing::warn!("vpntunnel 302 location={:?}", resp.header("location"));
+                return Err(ControlError::HttpStatus(302));
+            }
             other => return Err(ControlError::HttpStatus(other)),
         }
 
@@ -495,9 +509,24 @@ impl ControlClient {
         let mut pending = buf[head_end..].to_vec(); // 201 的 body 或服务端抢先发的帧
         let common_payload;
         loop {
+            // 诊断：未知帧类型（如 '3'）——打印内容并跳过，继续等 'Q'
+            if pending.len() >= CONFIG_FRAME_HEADER_LEN && !matches!(pending[0], 0x50 | 0x51 | 0x55) {
+                let len = u32::from_le_bytes([pending[4], pending[5], pending[6], pending[7]]) as usize;
+                if pending.len() >= CONFIG_FRAME_HEADER_LEN + len {
+                    tracing::warn!(
+                        "unknown frame kind='{}' (0x{:02X}) len={len} payload_hex={:02X?} payload_utf8={:?}",
+                        pending[0] as char, pending[0],
+                        &pending[CONFIG_FRAME_HEADER_LEN..CONFIG_FRAME_HEADER_LEN + len],
+                        String::from_utf8_lossy(&pending[CONFIG_FRAME_HEADER_LEN..CONFIG_FRAME_HEADER_LEN + len])
+                    );
+                    pending.drain(..CONFIG_FRAME_HEADER_LEN + len);
+                    continue;
+                }
+            }
             if let Some(res) = decode_config_frame(&pending) {
                 let (kind, payload, used) = res.map_err(|_| ControlError::Malformed)?;
                 if kind != ConfigMsgType::CommonConfig {
+                    tracing::warn!("expected 'Q' common config, got kind={kind:?}");
                     return Err(ControlError::Malformed);
                 }
                 common_payload = payload;
@@ -506,37 +535,155 @@ impl ControlClient {
             }
             let n = stream.read(&mut chunk).await?;
             if n == 0 {
+                tracing::warn!("stream EOF waiting for 'Q' frame, pending={:?}B", pending.len());
                 return Err(ControlError::Malformed);
             }
             pending.extend_from_slice(&chunk[..n]);
+            tracing::debug!("waiting 'Q': +{n}B pending={} head={:02X?}", pending.len(), &pending.iter().take(8).collect::<Vec<_>>());
         }
+        tracing::info!(
+            "'Q' common config: {} bytes: {}",
+            common_payload.len(),
+            String::from_utf8_lossy(&common_payload)
+        );
 
         // 'T' 网络配置请求（本机 IP 列表 + MAC）→ 'U' 响应（虚拟 IP/DNS）
         stream
             .write_all(&crate::protocol::network_config_request(local_ips, mac))
             .await?;
         let mut netcfg = crate::protocol::NetworkConfig::default();
-        loop {
-            if let Some(res) = decode_config_frame(&pending) {
-                let (kind, payload, used) = res.map_err(|_| ControlError::Malformed)?;
-                if kind != ConfigMsgType::NetworkConfig {
-                    // 非 'U' 帧（顺序差异/额外推送）——跳过继续等
+        let u_wait = async {
+            loop {
+                // 诊断：未知帧类型——打印并跳过，继续等 'U'
+                if pending.len() >= CONFIG_FRAME_HEADER_LEN
+                    && !matches!(pending[0], 0x50 | 0x51 | 0x55)
+                {
+                    let len =
+                        u32::from_le_bytes([pending[12], pending[13], pending[14], pending[15]])
+                            as usize;
+                    if pending.len() >= CONFIG_FRAME_HEADER_LEN + len {
+                        tracing::warn!(
+                            "waiting 'U': unknown frame kind='{}' (0x{:02X}) len={len} utf8={:?}",
+                            pending[0] as char,
+                            pending[0],
+                            String::from_utf8_lossy(
+                                &pending[CONFIG_FRAME_HEADER_LEN..CONFIG_FRAME_HEADER_LEN + len]
+                            )
+                        );
+                        pending.drain(..CONFIG_FRAME_HEADER_LEN + len);
+                        continue;
+                    }
+                }
+                if let Some(res) = decode_config_frame(&pending) {
+                    let (kind, payload, used) = res.map_err(|_| ControlError::Malformed)?;
+                    if kind != ConfigMsgType::NetworkConfig {
+                        // 非 'U' 帧（顺序差异/额外推送）——跳过继续等
+                        tracing::debug!("waiting 'U': skip kind={kind:?} {}B", payload.len());
+                        pending.drain(..used);
+                        continue;
+                    }
+                    // 帧尾可能带 NUL 填充字节（真机实测 10986B 含尾部 0x00，
+                    // serde 整体校验会拒绝）——先剔除再解析
+                    let trimmed: &[u8] = {
+                        let end = payload
+                            .iter()
+                            .rposition(|&b| b != 0)
+                            .map(|i| i + 1)
+                            .unwrap_or(0);
+                        &payload[..end]
+                    };
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(trimmed) {
+                        netcfg = crate::protocol::NetworkConfig::from_control_json(&v);
+                    } else {
+                        // 真机 'U' 载荷是二进制结构（非 JSON）：启发式扫描 vIP/掩码/include 路由
+                        netcfg = crate::protocol::NetworkConfig::from_binary(&payload);
+                        // 布局取证：完整载荷落盘（%TEMP%/opencode/u_frame.bin）+ 头部 hex
+                        let dump_dir =
+                            std::path::PathBuf::from(std::env::temp_dir()).join("opencode");
+                        let _ = std::fs::create_dir_all(&dump_dir);
+                        let _ = std::fs::write(dump_dir.join("u_frame.bin"), &payload);
+                        tracing::debug!(
+                            "U payload ({}B) dumped; head hex: {:02X?}",
+                            payload.len(),
+                            &payload.iter().take(96).collect::<Vec<_>>()
+                        );
+                    }
+                    tracing::info!(
+                        "network config: vip={:?} mask={:?} dns={:?} include_routes={}",
+                        netcfg.virtual_ip,
+                        netcfg.netmask,
+                        netcfg.dns,
+                        netcfg
+                            .include_routes
+                            .iter()
+                            .map(|(ip, m)| format!("{ip}/{m}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
                     pending.drain(..used);
-                    continue;
+                    return Ok::<(), ControlError>(());
                 }
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&payload) {
-                    netcfg = crate::protocol::NetworkConfig::from_json(&v);
+                // 短超时读：'U' 帧头声明长度可能大于实际到达量（真机 3548 vs 1796），
+                // 1s 无新数据且帧头是 'U' 就按已有字节部分解析
+                match tokio::time::timeout(std::time::Duration::from_secs(1), stream.read(&mut chunk)).await {
+                    Ok(Ok(0)) => {
+                        // 对端直接进入数据模式：无 'U' 也可用（虚拟 IP 由调用方缺省处理）
+                        tracing::warn!("waiting 'U': stream EOF, enter data mode with defaults");
+                        return Ok::<(), ControlError>(());
+                    }
+                    Ok(Ok(n)) => {
+                        pending.extend_from_slice(&chunk[..n]);
+                        tracing::debug!(
+                            "waiting 'U': +{n}B pending={} head={:02X?}",
+                            pending.len(),
+                            &pending.iter().take(8).collect::<Vec<_>>()
+                        );
+                    }
+                    Ok(Err(e)) => return Err(e.into()),
+                    Err(_) => {
+                        if pending.len() >= CONFIG_FRAME_HEADER_LEN && pending[0] == 0x55 {
+                            tracing::warn!(
+                                "waiting 'U': no more data (declared len > received), partial-parse {}B payload",
+                                pending.len() - CONFIG_FRAME_HEADER_LEN
+                            );
+                            let payload = pending[CONFIG_FRAME_HEADER_LEN..].to_vec();
+                            let trimmed: Vec<u8> = {
+                                let end = payload
+                                    .iter()
+                                    .rposition(|&b| b != 0)
+                                    .map(|i| i + 1)
+                                    .unwrap_or(0);
+                                payload[..end].to_vec()
+                            };
+                            netcfg = match serde_json::from_slice::<serde_json::Value>(&trimmed) {
+                                Ok(v) => crate::protocol::NetworkConfig::from_control_json(&v),
+                                Err(_) => crate::protocol::NetworkConfig::from_binary(&payload),
+                            };
+                            tracing::info!(
+                                "network config(partial): vip={:?} mask={:?} routes={}",
+                                netcfg.virtual_ip, netcfg.netmask,
+                                netcfg.include_routes.iter().map(|(i, m)| format!("{i}/{m}")).collect::<Vec<_>>().join(",")
+                            );
+                            pending.clear();
+                            return Ok::<(), ControlError>(());
+                        }
+                    }
                 }
-                pending.drain(..used);
-                return Ok((stream, common_payload, netcfg, pending));
             }
-            let n = stream.read(&mut chunk).await?;
-            if n == 0 {
-                // 对端直接进入数据模式：无 'U' 也可用（虚拟 IP 由调用方缺省处理）
-                return Ok((stream, common_payload, netcfg, pending));
-            }
-            pending.extend_from_slice(&chunk[..n]);
+        };
+        // 'U' 10s 不回 → 带缺省进入数据模式（宽容）
+        if tokio::time::timeout(std::time::Duration::from_secs(10), u_wait)
+            .await
+            .is_err()
+        {
+            // 转储 U 帧原始字节（真机 U 帧为二进制结构，字段布局待对齐）
+            let dump: Vec<u8> = pending.iter().take(96).cloned().collect();
+            tracing::warn!(
+                "waiting 'U': 10s timeout, enter data mode with defaults; U head hex={:02X?}",
+                dump
+            );
         }
+        return Ok((stream, common_payload, netcfg, pending));
     }
 }
 
@@ -761,7 +908,9 @@ mod tests {
                     tls.read_exact(&mut treq).await.unwrap();
                     assert_eq!(treq[0], b'T');
                     assert_eq!(treq[12], 32);
-                    let net_json = br#"{"virip":"10.8.0.2","mask":"255.255.255.0","dns":["10.8.0.1"]}"#;
+                    // 真实 U 帧结构（LE u32 编码 IP）：10.8.0.2 → LE u32 0x0200080A=33556490，
+                    // /24 掩码 → 16777215；include 10.3.130.0/24；dns 10.8.0.1
+                    let net_json = br#"{"client_ipv4":33556490,"client_ipv4_mask":16777215,"include_network_resource":{"ipv4":[{"ip":8390154,"mask":16777215}]},"dns_servers":[{"ipv4":[16783370]}]}"#;
                     let mut resp = crate::protocol::encode_config_frame(
                         crate::protocol::ConfigMsgType::NetworkConfig,
                         net_json,

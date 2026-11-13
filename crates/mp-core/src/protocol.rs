@@ -246,17 +246,16 @@ pub struct TunnelOpenParams<'a> {
 }
 
 /// 构造 `GET /prx/000/http/localhost/vpntunnel` 请求（Ghidra T2：get_config.c 0x4fa）。
+/// `PAYLOAD-IP-VERSION: 6` 无条件携带（反编译实证：所有分支恒定发送，
+/// 缺失时网关可能不启用载荷转发 —— 真机实测对照点）。
 pub fn vpntunnel_request(host: &str, params: &TunnelOpenParams) -> String {
     let mut req = format!(
         "GET {VPNTUNNEL_PATH} HTTP/1.1\r\nHost: {host}\r\n\
          Cookie: ANStandalone=true;{}\r\nx-devtype: {}\r\nappid: SSPVPN\r\n\
-         clientid: {}\r\ncpuid: {}\r\nhostname: {}",
+         clientid: {}\r\ncpuid: {}\r\nhostname: {}\r\nPAYLOAD-IP-VERSION: 6\r\n",
         params.cookie, params.dev_type, params.client_id, params.cpu_id, params.hostname
     );
-    if params.ipv6 {
-        req.push_str("\r\nPAYLOAD-IP-VERSION: 6");
-    }
-    req.push_str("\r\n\r\n");
+    req.push_str("\r\n");
     req
 }
 
@@ -276,16 +275,17 @@ pub enum ConfigMsgType {
 }
 
 /// 编码 16 字节配置帧头 + 载荷。
+/// 长度字段位于 [12..16]（真机实测：'Q' 帧 72B 总长，[4..8]=0；与 'T' 请求布局一致）。
 pub fn encode_config_frame(kind: ConfigMsgType, payload: &[u8]) -> Vec<u8> {
     let mut f = vec![0u8; CONFIG_FRAME_HEADER_LEN + payload.len()];
     f[0] = kind as u8;
-    f[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    f[12..16].copy_from_slice(&(payload.len() as u32).to_le_bytes());
     f[CONFIG_FRAME_HEADER_LEN..].copy_from_slice(payload);
     f
 }
 
 /// 解码配置帧；缓冲不足返回 `None`，格式非法返回 `Err(())`。
-/// TODO(抓包): 长度字段 LE/BE 待实测对齐（反编译显示 short 直接作 malloc 尺寸 → LE）。
+/// 长度字段读 [12..16]（真机实测对齐 'T' 请求布局）。
 pub fn decode_config_frame(buf: &[u8]) -> Option<Result<(ConfigMsgType, Vec<u8>, usize), ()>> {
     if buf.len() < CONFIG_FRAME_HEADER_LEN {
         return None;
@@ -296,7 +296,7 @@ pub fn decode_config_frame(buf: &[u8]) -> Option<Result<(ConfigMsgType, Vec<u8>,
         0x55 => ConfigMsgType::NetworkConfig,
         _ => return Some(Err(())),
     };
-    let len = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+    let len = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]) as usize;
     let total = CONFIG_FRAME_HEADER_LEN + len;
     if buf.len() < total {
         return None;
@@ -331,10 +331,100 @@ pub struct NetworkConfig {
     pub netmask: Option<std::net::Ipv4Addr>,
     #[serde(default)]
     pub dns: Vec<std::net::Ipv4Addr>,
+    /// Include 路由（split tunnel 走隧道的网段）。
+    #[serde(default, skip)]
+    pub include_routes: Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)>,
 }
 
 impl NetworkConfig {
-    /// 从任意 JSON 提取（递归浅扫键名候选）。
+    /// 真机 'U' 帧精确解析（PAYLOAD-IP-VERSION:6 时全量下发，10986B JSON 实证）：
+    /// ```jsonc
+    /// { "resource_group_flag": 8,
+    ///   "client_ipv4": 3444923146,          // LE u32 → 10.91.x.x
+    ///   "client_ipv4_mask": 15794175,       // LE u32 → 255.255.240.0
+    ///   "include_network_resource": {"ipv4":[{"ip":16906,"mask":65535,...}]},
+    ///   "exclude_network_resource": {...},
+    ///   "dns_servers": [{"ipv4":[200538634, 183761418]}] }
+    /// ```
+    pub fn from_control_json(v: &serde_json::Value) -> Self {
+        let le_ip = |n: &serde_json::Value| -> Option<std::net::Ipv4Addr> {
+            n.as_u64()
+                .filter(|&x| x <= u32::MAX as u64)
+                .map(|x| std::net::Ipv4Addr::from((x as u32).to_le_bytes()))
+        };
+        let mut out = Self {
+            virtual_ip: le_ip(&v["client_ipv4"]),
+            netmask: le_ip(&v["client_ipv4_mask"]),
+            ..Default::default()
+        };
+        for entry in v["include_network_resource"]["ipv4"]
+            .as_array()
+            .unwrap_or(&vec![])
+        {
+            if let (Some(ip), Some(m)) = (le_ip(&entry["ip"]), le_ip(&entry["mask"])) {
+                out.include_routes.push((ip, m));
+            }
+        }
+        if let Some(arr) = v["dns_servers"].as_array() {
+            for srv in arr {
+                for d in srv["ipv4"].as_array().unwrap_or(&vec![]) {
+                    if let Some(ip) = le_ip(d) {
+                        out.dns.push(ip);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// 二进制 'U' 载荷启发式解析（真机实测 1796B 布局）：
+    /// 扫描 (IPv4, 连续掩码) 相邻对 —— 第一对 = 虚拟 IP/掩码
+    /// （实测 10.91.18.97 + 255.255.248.0），后续私有网段对 = include 路由
+    /// （实测 10.66.0.0/16、10.3.130.0/24 等，与原版 Include Zone 取证吻合）。
+    pub fn from_binary(payload: &[u8]) -> Self {
+        let mut out = Self::default();
+        // 严格掩码：二进制位必须连续（如 FF FF F8 00），排除巧合递减序列
+        let is_mask = |b: &[u8]| {
+            if b.len() != 4 || b[0] == 0 {
+                return false;
+            }
+            let m = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+            let ones = m.leading_ones();
+            ones > 0 && m == (u32::MAX << (32 - ones))
+        };
+        let is_private_ip = |b: &[u8]| b[0] == 10 || b[0] == 172 || b[0] == 192;
+        let mut i = 0usize;
+        while i + 8 <= payload.len() {
+            let ip = &payload[i..i + 4];
+            let mask = &payload[i + 4..i + 8];
+            if is_private_ip(ip) && is_mask(mask) && !(ip.iter().all(|&b| b == 0)) {
+                let ipa = std::net::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
+                let mka = std::net::Ipv4Addr::new(mask[0], mask[1], mask[2], mask[3]);
+                // 全 1 掩码（255.255.255.255）多为标记字段而非路由，跳过
+                if mka != std::net::Ipv4Addr::BROADCAST {
+                    if out.virtual_ip.is_none() {
+                        // 虚拟 IP 优先取"非整段零主机位"的对（如 10.91.18.97/21）
+                        let network = u32::from(ipa) & u32::from(mka);
+                        if network != u32::from(ipa) {
+                            out.virtual_ip = Some(ipa);
+                            out.netmask = Some(mka);
+                            i += 8;
+                            continue;
+                        }
+                    } else if !out.include_routes.iter().any(|&(r, _)| r == ipa) {
+                        out.include_routes.push((ipa, mka));
+                        i += 8;
+                        continue;
+                    }
+                }
+            }
+            i += 4; // 按字滑动，容忍字段对齐差异
+        }
+        out
+    }
+
+    /// 从任意 JSON 提取（递归浅扫键名候选）——用于测试/兼容路径。
+    #[allow(dead_code)]
     pub fn from_json(value: &serde_json::Value) -> Self {
         use serde_json::Value;
         let mut out = Self::default();
@@ -554,7 +644,8 @@ mod tests {
         assert!(req.contains("x-devtype: 1\r\n"));
         assert!(req.contains("appid: SSPVPN\r\n"));
         assert!(req.contains("clientid: cid\r\ncpuid: cpu123\r\nhostname: PC-1"));
-        assert!(!req.contains("PAYLOAD-IP-VERSION"));
+        // 原版所有分支无条件带 PAYLOAD-IP-VERSION: 6（反编译实证）
+        assert!(req.contains("PAYLOAD-IP-VERSION: 6\r\n"));
         assert!(req.ends_with("\r\n\r\n"));
     }
 

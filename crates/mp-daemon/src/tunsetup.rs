@@ -86,8 +86,9 @@ impl TunLink {
         if veth_ip.is_some() {
             let mut applied = false;
             for r in routes {
-                if mgr.add_route(r).is_ok() {
-                    applied = true;
+                match mgr.add_route(r) {
+                    Ok(()) => applied = true,
+                    Err(e) => tracing::warn!("add_route {r} failed: {e}"),
                 }
             }
             if !dns.is_empty() {

@@ -84,8 +84,12 @@ impl RouteManager {
     /// 添加一条到内网网段的路由（指向虚拟网卡）。成功后记录以便回滚。
     pub fn add_route(&mut self, cidr: &str) -> Result<(), PlatformError> {
         let argv = match std::env::consts::OS {
-            "windows" => windows_route_add(cidr, &self.gateway, 25)
-                .map_err(|e| PlatformError::Route(e.to_string()))?,
+            "windows" => {
+                // 显式绑定接口索引，避免 wintun IP 注册竞态导致路由落到物理网卡
+                let if_index = crate::route::windows_if_index(&self.interface);
+                windows_route_add(cidr, &self.gateway, 25, if_index)
+                    .map_err(|e| PlatformError::Route(e.to_string()))?
+            },
             "linux" => linux_route_add(cidr, &self.gateway, &self.interface)
                 .map_err(|e| PlatformError::Route(e.to_string()))?,
             "macos" => macos_route_add(cidr, &self.gateway)
