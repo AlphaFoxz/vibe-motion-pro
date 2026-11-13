@@ -1,10 +1,10 @@
-// 分析网关流 180.168.195.91:443 的包间隔与尺寸时序
+// 分析网关流 203.0.113.10:443 的包间隔与尺寸时序
 const fs = require("fs");
 const buf = fs.readFileSync(process.argv[2] || "C:/Users/84195/mpcap.pcapng");
 
 let off = 0;
 const evts = []; // {ts, dir, size}
-const GATEWAY = "180.168.195.91";
+const GATEWAY = "203.0.113.10";
 
 while (off + 12 <= buf.length) {
   const blockType = buf.readUInt32LE(off);

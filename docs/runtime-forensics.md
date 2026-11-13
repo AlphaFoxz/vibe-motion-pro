@@ -9,7 +9,7 @@
 |---|---|---|
 | MotionPro.exe | UI | UDP 127.0.0.1:57133；-connectsession 命令行启动（Web 单点登录拉起） |
 | vpnd.exe | 守护/状态机 | **监听 127.0.0.1:65432 TCP+UDP**（IPC 总线），每 1 秒轮询 VNIC 状态并广播 |
-| VPNService.exe | Windows 服务 | **持有到网关的 TCP 443 长连接**（180.168.195.91，ESTABLISHED）|
+| VPNService.exe | Windows 服务 | **持有到网关的 TCP 443 长连接**（203.0.113.10，ESTABLISHED）|
 | VPNInstallManager.exe | 安装管理服务 | |
 | MotionProHttpd.exe | web portal | 监听 127.0.0.1:60012 |
 | WebVPN.exe（SSL VPN Client 目录） | PAC/代理脚本 | `-setproxyforvnic` / `-resumeproxyforvnic` |
@@ -20,7 +20,7 @@ vpnd 只做 VNIC/路由/状态广播——与"vpnd 独立建隧道"的旧假设�
 
 ## 会话参数（本机实测）
 
-- 网关：`vpntoken.baosteel.com` = `180.168.195.91:443`，TLS 1.2（sslProtocol=2）
+- 网关：`vpn.example.com` = `203.0.113.10:443`，TLS 1.2（sslProtocol=2）
 - 隧道类型：10 (Default) → 解析为 TCP 隧道（`set_udp_tunnel_running_status: 0`，UDP 禁用）
 - VNIC：`Array Networks SSL VPN Driver`（另有 TAP-Windows Adapter 备用），adapterType=2
 - VNIC IP：10.91.17.175/（网段内网关 10.91.16.1），**split tunnel**：约 30 条 /24-/30 路由（10.25.x、10.3.x 等）全部走 10.91.16.1，metric 25，物理网 metric 45
@@ -34,7 +34,7 @@ TLS 连接网关 443 (openssl init, TLS1.2, socket 1380)
 → GET /prx/000/http/localhost/an_login.js            # 查询 AAA 认证方式
 → session cookie 复用（"session cookie exist, don't need to login"）
 → GET settings（get_settings_motionpro：bookmark、cs postlogin、cs interval=300）
-→ GET /prx/000/http/localhost:65200/motionpro/postlogin/apps?_uname=YB8302&_role=&_pid=***&_instid=default
+→ GET /prx/000/http/localhost:65200/motionpro/postlogin/apps?_uname=example_user&_role=&_pid=***&_instid=default
   （返回 2 = 无资源，继续 L3VPN）
 → MotionPro --IPC--> vpnd: VpnStart {host, port=443, server type=2, sslproto=2,
    wg info(site_name/wg_server/wg_name), proxy 配置, devname=主机名}

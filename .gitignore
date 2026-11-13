@@ -3,3 +3,8 @@ app/node_modules
 app/dist
 app/src-tauri/target
 *.log
+# 敏感与临时产物
+reference/config/server.p12
+*.etl
+*.pcapng
+*.pcap

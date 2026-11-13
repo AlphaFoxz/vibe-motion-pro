@@ -152,21 +152,21 @@ mod tests {
 
     #[test]
     fn aaa_request_format() {
-        let r = aaa_method_request("vpntoken.baosteel.com");
+        let r = aaa_method_request("vpn.example.com");
         assert!(r.starts_with("GET /prx/000/http/localhost/an_login.js HTTP/1.1\r\n"));
-        assert!(r.contains("Host: vpntoken.baosteel.com"));
+        assert!(r.contains("Host: vpn.example.com"));
         assert!(r.contains("Connection: Keep-Alive"));
     }
 
     #[test]
     fn postlogin_request_format() {
-        let r = postlogin_apps_request("h", "YB8302", "***", "default");
+        let r = postlogin_apps_request("h", "example_user", "***", "default");
         assert!(
             r.contains(
-                "_uname=YB8302&_role=&_pid=***& _instid=default"
+                "_uname=example_user&_role=&_pid=***& _instid=default"
                     .replace(' ', "")
                     .as_str()
-            ) || r.contains("_uname=YB8302&_role=&_pid=***&_instid=default")
+            ) || r.contains("_uname=example_user&_role=&_pid=***&_instid=default")
         );
     }
 }
