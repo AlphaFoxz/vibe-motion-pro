@@ -44,8 +44,9 @@
 
 ### 阶段2 协议与隧道实现
 
-- [ ] 认证（含证书校验、HWID）、UDP/TCP 隧道模式、心跳与自动重连 —— 控制通道已实现（rustls TLS + an_login.js AAA 查询 + session cookie jar + postlogin apps，mock TLS 服务器端到端测试覆盖）；服务器证书严格校验待接入 rootca；数据帧格式待 Ghidra
+- [ ] 认证（含证书校验、HWID）、UDP/TCP 隧道模式、心跳与自动重连 —— 控制通道已实现（rustls TLS + an_login.js AAA 查询 + session cookie jar + postlogin apps，mock TLS 服务器端到端测试覆盖）；服务器证书严格校验待接入 rootca；**数据面协议已由 Ghidra T1-T6 全部还原并实现**（dev-5：/vpntunnel 握手 + 16B 配置帧 + 裸 IP 转发泵 + keepalive 状态机，75 测试绿，见 docs/plan-dev-5.md）
 - [x] 虚拟网卡数据面 + 路由/DNS 接管 —— dev-4 已完成：tun crate 真实适配器（win=wintun/linux/mac）、RouteManager（路由下发+DNS 快照回滚，DryRun 可测）、ChannelAdapter 桥接、Dataplane::pump 真实推进栈、daemon TunnelIo 组装（58 测试全绿，见 docs/plan-dev-4.md）；帧格式确认后接 frame 编解码即闭环
+- [x] Ghidra 深度反编译（阶段0 项）—— T1-T6 全部完成（2026-11-14，Ghidra 12.2 headless 自动化流水线，见 docs/ghidra-tasks.md 结论小节）
 - [ ] 与原版客户端对拍验证（Wireshark 报文一致、连接成功率）
 
 ### 阶段3 UI 功能对齐

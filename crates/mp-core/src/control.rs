@@ -206,6 +206,64 @@ impl ControlClient {
         }
         Ok(resp.body)
     }
+
+    /// 数据隧道建立（Ghidra T2/T3：/vpntunnel 握手 → 同连接切二进制 → 16B 配置帧）。
+    ///
+    /// 返回 (进入数据模式的 TLS 流, 服务端 'Q' 通用配置 JSON 载荷, 握手阶段一并到达的剩余字节)。
+    /// 剩余字节属数据模式先导，调用方应灌入 PacketStream（同一 record 常含配置帧+首个数据包）。
+    /// - 200 = 二进制模式（本流程）；201 = JSON 协议（暂按二进制头继续）
+    /// - 302 Redirect = 拒绝
+    pub async fn open_tunnel(
+        &self,
+        params: &crate::protocol::TunnelOpenParams<'_>,
+    ) -> Result<(tokio_rustls::client::TlsStream<TcpStream>, Vec<u8>, Vec<u8>), ControlError> {
+        use crate::protocol::{
+            decode_config_frame, encode_config_frame, vpntunnel_request, ConfigMsgType,
+        };
+        let mut stream = self.connect_tls().await?;
+        let req = vpntunnel_request(&self.host, params);
+        stream.write_all(req.as_bytes()).await?;
+
+        // 读 HTTP 头（到 \r\n\r\n 为止；201 时其后可能直接是 JSON body，一并留在流里）
+        let mut buf = Vec::with_capacity(2048);
+        let mut chunk = [0u8; 1024];
+        let head_end;
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(ControlError::Malformed);
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                head_end = pos + 4;
+                break;
+            }
+        }
+        let resp = parse_response(&buf[..head_end])?;
+        match resp.status {
+            200 | 201 => {}
+            302 => return Err(ControlError::HttpStatus(302)),
+            other => return Err(ControlError::HttpStatus(other)),
+        }
+
+        // 二进制模式：发 'P' 请求 → 循环补读直到一个完整 'Q' 通用配置帧
+        stream.write_all(&encode_config_frame(ConfigMsgType::Request, b"")).await?;
+        let mut pending = buf[head_end..].to_vec(); // 201 的 body 或服务端抢先发的帧
+        loop {
+            if let Some(res) = decode_config_frame(&pending) {
+                let (kind, payload, used) = res.map_err(|_| ControlError::Malformed)?;
+                if kind != ConfigMsgType::CommonConfig {
+                    return Err(ControlError::Malformed);
+                }
+                return Ok((stream, payload, pending[used..].to_vec()));
+            }
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Err(ControlError::Malformed);
+            }
+            pending.extend_from_slice(&chunk[..n]);
+        }
+    }
 }
 
 /// 骨架阶段：不校验服务器证书。
@@ -373,5 +431,127 @@ mod tests {
         let mut session = Session::default();
         let err = client.query_aaa(&mut session).await.unwrap_err();
         assert!(matches!(err, ControlError::HttpStatus(403)));
+    }
+
+    // ---- /vpntunnel 握手 + 数据模式端到端 ----
+
+    /// 二进制 mock 服务器：读 vpntunnel GET → 回 200 → 读 'P' 帧 → 回 'Q' 配置帧 → 回显数据
+    async fn spawn_tunnel_mock() -> u16 {
+        use tokio::net::TcpListener;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use tokio_rustls::TlsAcceptor;
+
+        let cert = rcgen::generate_simple_self_signed(vec!["vpn.example.com".into()]).unwrap();
+        let key_der = PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into());
+        let cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(cert.cert)], key_der)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(cfg));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let Ok(mut tls) = acceptor.accept(sock).await else { return };
+                    let mut buf = vec![0u8; 8192];
+                    // 1. 读 GET /vpntunnel
+                    let Ok(n) = tls.read(&mut buf).await else { return };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    assert!(req.starts_with("GET /prx/000/http/localhost/vpntunnel HTTP/1.1"));
+                    assert!(req.contains("Cookie: ANStandalone=true;sid=s1"));
+                    assert!(req.contains("appid: SSPVPN"));
+                    // 2. 200 切二进制
+                    tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+                    // 3. 读 16B 'P' 帧
+                    let mut frame = [0u8; 16];
+                    tls.read_exact(&mut frame).await.unwrap();
+                    assert_eq!(frame[0], b'P');
+                    // 4. 回 'Q' 配置帧（JSON 载荷）
+                    let cfg_json = br#"{"mtu":1400}"#;
+                    let mut resp = crate::protocol::encode_config_frame(
+                        crate::protocol::ConfigMsgType::CommonConfig,
+                        cfg_json,
+                    );
+                    // 5. 紧跟一个下行裸 IP 包（数据模式）
+                    let mut pkt = vec![0u8; 28];
+                    pkt[0] = 0x45;
+                    pkt[2..4].copy_from_slice(&28u16.to_be_bytes());
+                    pkt[9] = 17;
+                    resp.extend_from_slice(&pkt);
+                    tls.write_all(&resp).await.unwrap();
+                    // 6. 回显后续所有字节（模拟隧道）
+                    loop {
+                        match tls.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(k) => {
+                                if tls.write_all(&buf[..k]).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_handshake_and_data_mode() {
+        let port = spawn_tunnel_mock().await;
+        let client =
+            ControlClient::new("vpn.example.com", port, true).unwrap().with_connect_addr("127.0.0.1", port);
+        let (mut stream, cfg, leftover) = client
+            .open_tunnel(&crate::protocol::TunnelOpenParams {
+                cookie: "sid=s1",
+                dev_type: 1,
+                client_id: "cid",
+                cpu_id: "cpu",
+                hostname: "PC",
+                ipv6: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(cfg, br#"{"mtu":1400}"#.to_vec());
+
+        // 数据模式先导：leftover 里应有服务端随配置帧同 record 发来的裸 IP 包
+        let mut wire_bytes = leftover;
+        if wire_bytes.len() < 28 {
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 64];
+            let n = stream.read(&mut buf).await.unwrap();
+            wire_bytes.extend_from_slice(&buf[..n]);
+        }
+        let mut ps = crate::frame::PacketStream::new();
+        ps.feed(&wire_bytes);
+        let item = ps.next_item().unwrap().unwrap();
+        assert!(matches!(item, crate::frame::StreamItem::IpPacket(ref p) if p.len() == 28));
+
+        // 再写一个包，服务器应回显
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let echo_in = [0x45u8, 0, 0, 20, 0, 0, 0, 0, 64, 6, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+        stream.write_all(&echo_in).await.unwrap();
+        let mut buf = [0u8; 64];
+        let n = stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], &echo_in);
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_rejects_302() {
+        let port = spawn_mock_tls(Arc::new(|_| {
+            "HTTP/1.1 302 Redirect\r\nLocation: /login\r\nContent-Length: 0\r\n\r\n".into()
+        }))
+        .await;
+        let client =
+            ControlClient::new("vpn.example.com", port, true).unwrap().with_connect_addr("127.0.0.1", port);
+        let err = client
+            .open_tunnel(&crate::protocol::TunnelOpenParams::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ControlError::HttpStatus(302)));
     }
 }

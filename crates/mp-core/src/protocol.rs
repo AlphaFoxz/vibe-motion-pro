@@ -13,8 +13,8 @@ pub const AN_LOGIN_PATH: &str = "/prx/000/http/localhost/an_login.js";
 /// postlogin 资源查询（证据：common.c:5514，65200 为服务端 web 端口）。
 pub const POSTLOGIN_APPS_PATH: &str = "/prx/000/http/localhost:65200/motionpro/postlogin/apps";
 
-/// 数据隧道通道（静态证据 vl3vpn.dll：`GET %s/vpntunnel HTTP/1.1`）。
-pub const VPNTUNNEL_PATH: &str = "/vpntunnel";
+/// 数据隧道通道（Ghidra T2 确认：%s = /prx/000/http/localhost，同连接升级二进制）。
+pub const VPNTUNNEL_PATH: &str = "/prx/000/http/localhost/vpntunnel";
 
 /// 登出端点（HAR 取证：an_welcome.js，见 docs/har-forensics.md）。
 pub const LOGOUT_PATH: &str = "/prx/000/http/localhost/logout";
@@ -105,8 +105,12 @@ pub const SERVER_KEEPALIVE_TIMEOUT_SECS: u64 = 15;
 /// vpnd 状态轮询周期（实测日志：detect_vni_status_thread 每 1 秒）。
 pub const STATUS_POLL_INTERVAL_SECS: u64 = 1;
 
-/// TCP 隧道心跳间隔（实测抓包：C→S 85B TLS record ≈ 4.4 包/秒，见 runtime-forensics.md）。
-pub const TCP_TUNNEL_KEEPALIVE_MS: u64 = 200;
+/// TCP 隧道 keepalive（Ghidra T1 确认：默认 30s，注册表 SendInterval 1-60 可调；
+/// 之前实测的 ~200ms 小流量是内层 TCP 自身心跳，非本协议 keepalive）。
+pub const KEEPALIVE_INTERVAL_SECS: u64 = 30;
+
+/// keepalive 无响应重连阈值（Ghidra T1：AttemptMaxTimes 默认 3，上限 300）。
+pub const KEEPALIVE_MAX_ATTEMPTS: u32 = 3;
 
 /// 状态数字枚举（对齐 route.cpp，日志实测）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +210,154 @@ pub fn postlogin_apps_request(host: &str, uname: &str, pid: &str, instid: &str) 
     )
 }
 
+/// /vpntunnel 握手参数（Ghidra T2 确认的请求头集）。
+#[derive(Debug, Clone, Default)]
+pub struct TunnelOpenParams<'a> {
+    /// Cookie 值（通常为 "ANStandalone=true;<session>"）。
+    pub cookie: &'a str,
+    /// 设备类型（x-devtype，实测值 1）。
+    pub dev_type: i32,
+    /// 客户端 ID（clientid 头）。
+    pub client_id: &'a str,
+    /// CPU ID（cpuid 头，来自 HWID 工具）。
+    pub cpu_id: &'a str,
+    /// 主机名（hostname 头，gethostname）。
+    pub hostname: &'a str,
+    /// IPv6 载荷模式时追加 PAYLOAD-IP-VERSION: 6。
+    pub ipv6: bool,
+}
+
+/// 构造 `GET /prx/000/http/localhost/vpntunnel` 请求（Ghidra T2：get_config.c 0x4fa）。
+pub fn vpntunnel_request(host: &str, params: &TunnelOpenParams) -> String {
+    let mut req = format!(
+        "GET {VPNTUNNEL_PATH} HTTP/1.1\r\nHost: {host}\r\n\
+         Cookie: ANStandalone=true;{}\r\nx-devtype: {}\r\nappid: SSPVPN\r\n\
+         clientid: {}\r\ncpuid: {}\r\nhostname: {}",
+        params.cookie, params.dev_type, params.client_id, params.cpu_id, params.hostname
+    );
+    if params.ipv6 {
+        req.push_str("\r\nPAYLOAD-IP-VERSION: 6");
+    }
+    req.push_str("\r\n\r\n");
+    req
+}
+
+/// 16 字节配置帧（HTTP 200 后同连接二进制模式；Ghidra T3）。
+/// 布局：`[0]=消息类型字符 [1..4]=0 [4..8]=载荷长度(LE u32)`，载荷 = JSON。
+pub const CONFIG_FRAME_HEADER_LEN: usize = 16;
+
+/// 配置帧消息类型（Ghidra T3：P=客户端请求，Q=通用配置响应，U=网络配置响应）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigMsgType {
+    /// 客户端 → 服务端：请求通用配置（帧其余字段为 0，首 u32=0x50）。
+    Request = 0x50,      // 'P'
+    /// 服务端 → 客户端：通用配置 JSON。
+    CommonConfig = 0x51, // 'Q'
+    /// 服务端 → 客户端：网络配置 JSON。
+    NetworkConfig = 0x55, // 'U'
+}
+
+/// 编码 16 字节配置帧头 + 载荷。
+pub fn encode_config_frame(kind: ConfigMsgType, payload: &[u8]) -> Vec<u8> {
+    let mut f = vec![0u8; CONFIG_FRAME_HEADER_LEN + payload.len()];
+    f[0] = kind as u8;
+    f[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    f[CONFIG_FRAME_HEADER_LEN..].copy_from_slice(payload);
+    f
+}
+
+/// 解码配置帧；缓冲不足返回 `None`，格式非法返回 `Err(())`。
+/// TODO(抓包): 长度字段 LE/BE 待实测对齐（反编译显示 short 直接作 malloc 尺寸 → LE）。
+pub fn decode_config_frame(buf: &[u8]) -> Option<Result<(ConfigMsgType, Vec<u8>, usize), ()>> {
+    if buf.len() < CONFIG_FRAME_HEADER_LEN {
+        return None;
+    }
+    let kind = match buf[0] {
+        0x50 => ConfigMsgType::Request,
+        0x51 => ConfigMsgType::CommonConfig,
+        0x55 => ConfigMsgType::NetworkConfig,
+        _ => return Some(Err(())),
+    };
+    let len = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+    let total = CONFIG_FRAME_HEADER_LEN + len;
+    if buf.len() < total {
+        return None;
+    }
+    Some(Ok((kind, buf[CONFIG_FRAME_HEADER_LEN..total].to_vec(), total)))
+}
+
+/// postlogin apps JSON（Ghidra T5 确认的字段集；jsoncpp 解析，缺省宽容）。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct SiteConfig {
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default)]
+    pub session: String,
+    #[serde(default)]
+    pub server_type: i64,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub validcode: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub certpath: String,
+    #[serde(default)]
+    pub certpassword: String,
+    #[serde(default)]
+    pub reconncount: i64,
+    #[serde(default)]
+    pub reconntime: i64,
+    #[serde(default)]
+    pub reconninterval: i64,
+    #[serde(default)]
+    pub flags: u32,
+    #[serde(default)]
+    pub tunneltype: i64,
+    #[serde(default)]
+    pub sslproto: i64,
+    #[serde(default)]
+    pub proxyhost: String,
+    #[serde(default)]
+    pub proxyport: u16,
+    #[serde(default)]
+    pub proxydomain: String,
+    #[serde(default)]
+    pub proxyusername: String,
+    #[serde(default)]
+    pub proxypassword: String,
+}
+
+/// WireGuard 站点配置（存在时启用 WG 隧道）。
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct WgConfig {
+    #[serde(default)]
+    pub site_name: String,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default)]
+    pub pub_key: String,
+    #[serde(default)]
+    pub wg_desc: String,
+    #[serde(default)]
+    pub wg_name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PostloginApps {
+    #[serde(default)]
+    pub site: SiteConfig,
+    #[serde(default)]
+    pub wg: Option<WgConfig>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +400,83 @@ mod tests {
             ws_receiver("ANsession1", "prof1", "u1"),
             "ANsession1=prof1+u1"
         );
+    }
+
+    #[test]
+    fn vpntunnel_request_headers() {
+        let req = vpntunnel_request(
+            "vpn.example.com",
+            &TunnelOpenParams {
+                cookie: "sid=abc",
+                dev_type: 1,
+                client_id: "cid",
+                cpu_id: "cpu123",
+                hostname: "PC-1",
+                ipv6: false,
+            },
+        );
+        assert!(req.starts_with("GET /prx/000/http/localhost/vpntunnel HTTP/1.1\r\n"));
+        assert!(req.contains("Host: vpn.example.com\r\n"));
+        assert!(req.contains("Cookie: ANStandalone=true;sid=abc\r\n"));
+        assert!(req.contains("x-devtype: 1\r\n"));
+        assert!(req.contains("appid: SSPVPN\r\n"));
+        assert!(req.contains("clientid: cid\r\ncpuid: cpu123\r\nhostname: PC-1"));
+        assert!(!req.contains("PAYLOAD-IP-VERSION"));
+        assert!(req.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn vpntunnel_request_ipv6() {
+        let req = vpntunnel_request("h", &TunnelOpenParams { ipv6: true, ..Default::default() });
+        assert!(req.contains("PAYLOAD-IP-VERSION: 6\r\n"));
+    }
+
+    #[test]
+    fn config_frame_roundtrip() {
+        let f = encode_config_frame(ConfigMsgType::Request, b"");
+        assert_eq!(f.len(), CONFIG_FRAME_HEADER_LEN);
+        assert_eq!(f[0], b'P');
+        let (kind, payload, used) = decode_config_frame(&f).unwrap().unwrap();
+        assert_eq!(kind, ConfigMsgType::Request);
+        assert!(payload.is_empty());
+        assert_eq!(used, CONFIG_FRAME_HEADER_LEN);
+
+        let f = encode_config_frame(ConfigMsgType::CommonConfig, br#"{"a":1}"#);
+        let (kind, payload, used) = decode_config_frame(&f).unwrap().unwrap();
+        assert_eq!(kind, ConfigMsgType::CommonConfig);
+        assert_eq!(payload, br#"{"a":1}"#.to_vec());
+        assert_eq!(used, f.len());
+    }
+
+    #[test]
+    fn config_frame_incomplete_then_bad_type() {
+        // 不足 16B 头 → None（等待更多数据）
+        assert!(decode_config_frame(&[b'P', 0, 0]).is_none());
+        let mut f = encode_config_frame(ConfigMsgType::NetworkConfig, b"x");
+        f.truncate(CONFIG_FRAME_HEADER_LEN); // 头在、载荷缺 → None
+        assert!(decode_config_frame(&f).is_none());
+        // 未知类型 → Err
+        let mut bad = [0u8; CONFIG_FRAME_HEADER_LEN];
+        bad[0] = b'Z';
+        assert!(decode_config_frame(&bad).unwrap().is_err());
+    }
+
+    #[test]
+    fn postlogin_apps_parse() {
+        let raw = r#"{
+            "site": {"domain":"vpn.example.com","session":"S1","port":443,
+                     "tunneltype":0,"sslproto":3,"flags":512,"method":"Local"},
+            "wg": {"site_name":"wg1","session_id":"W1","ip":"10.9.0.1","pub_key":"K="}
+        }"#;
+        let apps: PostloginApps = serde_json::from_str(raw).unwrap();
+        assert_eq!(apps.site.domain, "vpn.example.com");
+        assert_eq!(apps.site.session, "S1");
+        assert_eq!(apps.site.sslproto, 3);
+        assert_eq!(apps.wg.as_ref().unwrap().pub_key, "K=");
+
+        // 空对象宽容解析
+        let empty: PostloginApps = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.site.port, 0);
+        assert!(empty.wg.is_none());
     }
 }

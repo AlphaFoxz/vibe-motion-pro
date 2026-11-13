@@ -56,7 +56,20 @@ AAA：`ArrayGetAAAMethodInfo` / `ArraySetAAAMethodNameW`
 
 ## 下一步逆向任务
 
-- [ ] Ghidra 反编译 vpnd.exe：`/vpntunnel` 请求/响应格式、认证字段、cookie 处理
-- [ ] Ghidra 反编译 vl3vpn.dll：隧道包封装格式、keepalive 报文、MTU/TAF 结构
+- [ ] Ghidra 反编译 vpnd.exe：`/vpntunnel` 请求/响应格式、认证字段、cookie 处理 → **已完成，见 ghidra-tasks.md T2/T5**
+- [x] Ghidra 反编译 vl3vpn.dll：隧道包封装格式、keepalive 报文、MTU/TAF 结构 → **T1/T3/T4/T6 完成（2026-11-14，Ghidra 12.2 headless 自动化）**
 - [ ] Wireshark 抓包（TCP 隧道 + UDP 隧道 + WG 各一次）印证
 - [ ] 确认 ObfuscateKey（TunSafe TCP 混淆）算法与服务器开关
+
+## 已确认协议事实（Ghidra 逆向，详见 ghidra-tasks.md）
+
+- **数据面无封装**：TLS/DTLS/UDP 承载背靠背裸 IPv4/IPv6 包；IPv4 总长 +2 BE、IPv6 载荷长 +4 BE（总长+40）
+- **keepalive = 伪 IPv4 包**：20B，`45 00 00 14`，TTL=0 / 协议号 255 / 校验和 0，+12 计数(1)、+14 当日毫秒时间戳、+18 隧道类型(0/2)；默认 30s、3 次无响应重连
+- **/vpntunnel 请求**：`GET /prx/000/http/localhost/vpntunnel HTTP/1.1` + Cookie + appid/clientid/cpuid/hostname 等；200=二进制模式、201=JSON 协议、302 拒绝
+- **16B 配置帧**：`[0]=类型字符（P 请求/Q 通用配置/U 网络配置）[4]=载荷长度`，载荷为 JSON
+- **UDP 速度隧道**：明文 UDP 或 DTLS 承载同一裸 IP 流；写侧按内层协议（TCP=6 走 TCP 隧道，其余走 UDP）分流
+- **MTU/TAF**：INI `[Global_Configuration]`：VNIC_MTU∈[576,1472]、TAF=VNIC_TCP_ACK_Frequency∈[1,32]、L3VPNTunnelDispatchRule∈[0,4]
+
+## 重写映射更新
+
+- ~~lwIP 类数据面 + MPFR 帧占位~~ → `mp-core::frame::PacketStream`（裸 IP 切包器 + 伪 IPv4 keepalive，已实现）

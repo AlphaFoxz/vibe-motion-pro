@@ -101,32 +101,68 @@
 
 - 锚点：`DTLS SPEED TUNNEL`、`udp_tunnel.c`、`set_udp_tunnel_running_status`
 - 依赖：T2/T3 的 TCP 版结论作为对照
-- 问题：
-  - [ ] UDP 隧道端口与握手包
-  - [ ] DTLS 与 TCP 模式的切换条件（实测本环境 TCP；UDP 何时启用）
 - 结论：
-  - （待填）
+  - **UDP 读循环（FUN_10062c70，l3vpn.c 0x2e4）与 TCP 完全同构：裸 IP 包流**，同一套半包/多包切分
+  - 两种承载按会话标志（+0x59c8）区分：**明文 UDP `recvfrom`**（每报文即一或多个完整 IP 包）或 **DTLS `SSL_read`**（流式）
+  - **写路径分流**（FUN_10063650 vpn_tunnel_write，l3vpn.c 0x3cd）：按速度隧道模式（+0x59c0：1=tcp2tcp、2=tcp2udp 等）路由——内层 proto==6（TCP）与非 TCP 各走 TCP 隧道（SSL_write）或 UDP 隧道（FUN_1007dd70→sendto），裸包无封装
+  - 速度隧道启用条件（FUN_100659b0 l3vpn.c 0x7fb）：服务端配置允许（sess+0x5b7d）且客户端偏好非 0（sess+0x53a4，0=TCP/1=UDP/10=Default）时，先 FUN_1007e0f0 发送 udp clientid，失败则禁用 speed tunnel 回落 TCP
+  - [x] 握手包（clientid 交换）；[ ] UDP 端口协商细节（FUN_1007e0f0 待深挖）
 
 ## T5 认证字段
 
 - 锚点：`an_login.js`、`login_vpn_server`、`get_aaa_method`、`session_id`、`sslerror`、`sslproto`、`tunneltype`（vpnd.exe / vl3vpn.dll）
 - 问题：
-  - [ ] AAA 查询响应的解析格式（我们假定 `{"methods":[...]}`，真实字段名待确认）
-  - [ ] 登录提交经过 web portal（/restservice/vpnLogin/login，HAR 已得表单字段）后，
+  - [x] AAA 查询响应的解析格式（我们假定 `{"methods":[...]}`，真实字段名待确认）
+  - [x] 登录提交经过 web portal（/restservice/vpnLogin/login，HAR 已得表单字段）后，
         客户端如何拿到 vpn 会话（cookie → /vpntunnel？）
   - [ ] HWID 字段如何编码（vpnhwidtool_x64.exe 可单独分析，产出 HWIDType=100 的算法）
 - 结论：
-  - （待填）
+  - **postlogin apps JSON schema**（vpnd.exe 全量反编译 `docs/decomp/vpnd_all.c`，742 函数；解析函数 ~line 18060）：
+    ```jsonc
+    {
+      "site": {                        // 主隧道站点
+        "domain": "", "session": "",   // 会话凭据 → 用于 /vpntunnel 的 Cookie
+        "server_type": 0, "port": 443,
+        "method": "",                  // AAA 认证方法名（与 15 字符常量比较取子串转 int）
+        "validcode": "", "username": "", "password": "",
+        "certpath": "", "certpassword": "",          // 客户端证书
+        "reconncount": 0, "reconntime": 0, "reconninterval": 0,  // 重连参数
+        "flags": 0,                    // 能力位图（缺省 0x200），会话上再置 |0x180000
+        "tunneltype": 0, "sslproto": 0,              // 隧道类型 / SSL 协议版本号
+        "proxyhost": "", "proxyport": 0, "proxydomain": "", "proxyusername": "", "proxypassword": ""
+      },
+      "wg": {                          // WireGuard 站点（可选）
+        "site_name": "", "session_id": "", "ip": "", "pub_key": "", "wg_desc": "", "wg_name": ""
+      }
+    }
+    ```
+  - **会话流转确认**：web portal 登录 → postlogin apps 返回 `site.session` → 作为 Cookie（`ANStandalone=true;...`）发起 `GET /vpntunnel`（与 T2 结论闭环）
+  - WG session_id 另存注册表 `HKLM\SOFTWARE\VPN\AWG\session_id`（line 13712）
+  - 主机名经 `gethostname` + 解析（line 18234）——对应 /vpntunnel 请求头 `hostname:`
+  - 待办：0x4189db 处 15 字符 method 常量内容、HWID 编码算法（vpnhwidtool_x64.exe 未分析）
+  - **附带收获**（vpnd.exe 字符串全景）：
+    - 本地 IPC：`POST /channel/vpn HTTP/1.1` + `Content-Type: application/json` + `Host:127.0.0.1` —— UI↔vpnd 的本地 JSON 通道（印证我们的 IPC+broadcast 设计）
+    - 路由下发：`route add %s MASK 255.255.255.255 %s METRIC 1`、`route -6 add %s/128 %s METRIC 1`、`route add ::/0 %s METRIC 1`（v4/v6 默认路由）—— 与 mp-platform RouteManager 实现一致
+    - split tunnel：注册表 `HKCU\Software\VPN\VPN2\Include|Exclude`（`include_%d`/`exclude_%d` 枚举）、`virip=%d.%d.%d.%d@mask=%d.%d.%d.%d`、Include/Exclude Zone 数量、DNS list、Hostmap(host=, ip=)
+    - JSON 解析库为 **jsoncpp**（postlogin 响应解析）
 
 ## T6 MTU / TAF / tunnelRule
 
 - 锚点：`ArrayGetMTUAndTAF`、`ArraySetMTUAndTunnelRule`（ArrayVPNApi.dll 导出表）、
   `Get tunnelRule flag from reg: [%d]`
-- 问题：
-  - [ ] TAF（Traffic Access Filter）规则的数据结构
-  - [ ] split tunnel 域名表如何下发（实测路由表 30 条 /25）
 - 结论：
-  - （待填）
+  - `ArrayGetMTUAndTAF(short* mtu, short* taf)`（@10001990，ArrayApi.cpp）从**服务器下发的 INI 配置**（CommonConfiguration，configfile.cpp）读取 `[Global_Configuration]` 段：
+    | 键 | 含义 | 合法区间 |
+    |---|---|---|
+    | `VNIC_MTU` | 虚拟网卡 MTU | **[576, 1472]**（0x240-0x5c0），越界忽略 |
+    | `VNIC_DTLS_MTU` | DTLS 隧道 MTU | 同上 |
+    | `VNIC_TCP_ACK_Frequency` | **TAF**（TCP ACK 频率）| [1, 32] |
+    | `L3VPNTunnelDispatchRule` | 隧道分流规则（0-4）| [0, 4] |
+    | `Virtual_DNS_Timeout` / `Local_DNS_Timeout` | DNS 超时 ms | [100, 3000] |
+    | `Proxy_Profix_Value` | 代理前缀值 | [2, 3] |
+    | `Local_Subnet_Access` / `IPsec_Over_SSL` / `TLSV_12` | 布尔开关 | TLSV_12 缺省 true |
+  - 优先级：DTLS MTU 存在则覆盖普通 MTU；**MTU 1400 实测值在 [576,1472] 内自洽**
+  - [x] TAF 结构（TCP ACK 频率，非数据结构）；[ ] split tunnel 域名表下发格式（待'U'网络配置 JSON 深挖）
 
 ---
 
