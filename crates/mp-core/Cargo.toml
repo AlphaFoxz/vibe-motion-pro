@@ -8,7 +8,9 @@ license.workspace = true
 tokio = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+rustls-pemfile = "2"
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 toml = "0.8"
 tracing = { workspace = true }
@@ -16,4 +18,5 @@ smoltcp = { workspace = true }
 mp-ipc = { path = "../mp-ipc" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+rcgen = "0.13"
+tokio = { workspace = true, features = ["test-util", "net"] }
