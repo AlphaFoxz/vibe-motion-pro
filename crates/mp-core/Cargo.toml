@@ -10,6 +10,7 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+toml = "0.8"
 tracing = { workspace = true }
 smoltcp = { workspace = true }
 mp-ipc = { path = "../mp-ipc" }

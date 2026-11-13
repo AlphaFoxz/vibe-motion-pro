@@ -2,7 +2,7 @@
 
 use crate::{IpcError, Request, Response};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 pub async fn send<T: Serialize, W: AsyncWrite + Unpin>(msg: &T, w: &mut W) -> Result<(), IpcError> {
     let mut line = serde_json::to_string(msg)?;
@@ -27,7 +27,7 @@ pub async fn send_request<W: AsyncWrite + Unpin>(req: &Request, w: &mut W) -> Re
     send(req, w).await
 }
 
-pub async fn recv_request<R: AsyncRead + Unpin>(r: &mut R) -> Result<Request, IpcError> {
+pub async fn recv_request<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<Request, IpcError> {
     recv(r).await
 }
 
@@ -38,7 +38,7 @@ pub async fn send_response<W: AsyncWrite + Unpin>(
     send(res, w).await
 }
 
-pub async fn recv_response<R: AsyncRead + Unpin>(r: &mut R) -> Result<Response, IpcError> {
+pub async fn recv_response<R: AsyncBufRead + Unpin>(r: &mut R) -> Result<Response, IpcError> {
     recv(r).await
 }
 
@@ -48,8 +48,12 @@ mod tests {
     use crate::status::StatusSnapshot;
     use tokio::io::DuplexStream;
 
-    async fn duplex_pair() -> (DuplexStream, DuplexStream) {
-        tokio::io::duplex(4096)
+    async fn duplex_pair() -> (
+        tokio::io::BufReader<DuplexStream>,
+        tokio::io::BufReader<DuplexStream>,
+    ) {
+        let (a, b) = tokio::io::duplex(4096);
+        (tokio::io::BufReader::new(a), tokio::io::BufReader::new(b))
     }
 
     #[tokio::test]
@@ -81,8 +85,8 @@ mod tests {
 
     #[tokio::test]
     async fn closed_stream_yields_closed() {
-        let (a, mut b) = duplex_pair().await;
-        drop(a);
+        let (_a, mut b) = duplex_pair().await;
+        drop(_a);
         let err = recv_request(&mut b).await.unwrap_err();
         assert!(matches!(err, IpcError::Closed));
     }

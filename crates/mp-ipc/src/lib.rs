@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::status::StatusSnapshot;
 
 pub mod codec;
+pub mod profile;
 pub mod status;
 pub mod transport;
 
@@ -29,13 +30,18 @@ pub enum Request {
     GetSession,
     SetReconnect { enabled: bool, max_attempts: u32 },
     ListWireGuard,
+    ListProfiles,
+    AddProfile { profile: crate::profile::ProfileMsg },
+    RemoveProfile { profile_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     Status { status: StatusSnapshot },
+    StatusUpdate { status: StatusSnapshot },
     Session { session_id: Option<String> },
+    Profiles { profiles: Vec<crate::profile::ProfileMsg> },
     Ok,
     Error { message: String },
 }

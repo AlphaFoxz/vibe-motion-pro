@@ -30,7 +30,8 @@ fn status_from_response(res: Response) -> StatusSnapshot {
 }
 
 async fn ask_daemon(req: Request) -> Result<Response, String> {
-    let mut stream = tcp_connect(DAEMON_ADDR).await.map_err(|e| e.to_string())?;
+    let stream = tcp_connect(DAEMON_ADDR).await.map_err(|e| e.to_string())?;
+    let mut stream = tokio::io::BufReader::new(stream);
     send_request(&req, &mut stream).await.map_err(|e| e.to_string())?;
     recv_response(&mut stream).await.map_err(|e| e.to_string())
 }

@@ -33,6 +33,10 @@ impl Engine {
         self.session.as_ref()
     }
 
+    pub fn session_mut(&mut self) -> Option<&mut Session> {
+        self.session.as_mut()
+    }
+
     /// 发起连接（对应 ArrayStartVPNClient）。
     pub fn start(
         &mut self,
