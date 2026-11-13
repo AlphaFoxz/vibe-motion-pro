@@ -22,6 +22,9 @@ pub const SERVER_KEEPALIVE_TIMEOUT_SECS: u64 = 15;
 /// vpnd 状态轮询周期（实测日志：detect_vni_status_thread 每 1 秒）。
 pub const STATUS_POLL_INTERVAL_SECS: u64 = 1;
 
+/// TCP 隧道心跳间隔（实测抓包：C→S 85B TLS record ≈ 4.4 包/秒，见 runtime-forensics.md）。
+pub const TCP_TUNNEL_KEEPALIVE_MS: u64 = 200;
+
 /// 状态数字枚举（对齐 route.cpp，日志实测）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(i32)]

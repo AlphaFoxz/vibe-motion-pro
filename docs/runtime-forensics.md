@@ -47,6 +47,14 @@ TLS 连接网关 443 (openssl init, TLS1.2, socket 1380)
 - vpnd 状态广播：`send message to clients: cmd 1, error 0`，1s 周期
 - 重连实测：08:19 断开→reconnecting；17:03→17:05 reconnect failed（≈2 分钟后放弃）
 
+## 包级抓包结论（pktmon, 2026-11-13，49.6s 空闲隧道采样）
+
+- C→S 85 字节 TLS record ×220（去重后）≈ **4.4 包/秒，即 TCP 隧道心跳 ≈ 200ms 间隔**（部分突发 17-35ms，长尾 0.9-4.4s 为空闲期）
+- S→C 101 字节 record ×~1270（含重复 tap，去重后约 254）≈ 心跳回应（96B 明文）
+- 181/133（S→C）与 170/255/149（C→S）为偶发数据帧
+- 载荷为 TLS 加密，**帧内格式需 Ghidra 逆向 vl3vpn.dll 才能确认**（heartbeat 帧明文约 80B）
+- 抓包工具链：pktmon（需管理员）→ `pktmon etl2pcap` → 自研 `scripts/parse_pcap.js` / `scripts/analyze_gw.js`（已入库，pktmon 多组件重复捕获需按 seq 去重）
+
 ## 密码学栈
 - openssl init（libeay32 1.0 系）；TLS12 first priority，带协议降级尝试（Try TLSv1_2_client_method）
 
