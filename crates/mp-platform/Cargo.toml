@@ -14,3 +14,4 @@ linux = []
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tun = { workspace = true }

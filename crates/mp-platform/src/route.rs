@@ -121,6 +121,18 @@ pub fn macos_route_add(cidr: &str, gateway: &str) -> Result<Vec<String>, RouteEr
     ])
 }
 
+/// Linux 删除路由：`ip route del <cidr> dev <if>`。
+pub fn linux_route_delete(cidr: &str, dev: &str) -> Result<Vec<String>, RouteError> {
+    let (addr, prefix) = validate_cidr(cidr)?;
+    Ok(vec!["ip".into(), "route".into(), "del".into(), format!("{addr}/{prefix}"), "dev".into(), dev.into()])
+}
+
+/// macOS 删除路由：`route -n delete -net <cidr>`。
+pub fn macos_route_delete(cidr: &str) -> Result<Vec<String>, RouteError> {
+    let (addr, prefix) = validate_cidr(cidr)?;
+    Ok(vec!["route".into(), "-n".into(), "delete".into(), "-net".into(), format!("{addr}/{prefix}")])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

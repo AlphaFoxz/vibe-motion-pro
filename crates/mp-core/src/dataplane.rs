@@ -59,6 +59,35 @@ impl Adapter for MockAdapter {
     }
 }
 
+/// mpsc 通道适配器：桥接阻塞网卡线程（mp-platform::adapter::pump_in/out）
+/// 与异步数据面。rx 从内核读，write 送回内核。
+pub struct ChannelAdapter {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+}
+
+impl ChannelAdapter {
+    /// 创建一对（adapter, 内核侧 sender/receiver）：
+    /// - `net_tx`：交给 pump_in 线程（内核 → 数据面）
+    /// - `net_rx`：交给 pump_out 线程（数据面 → 内核）
+    pub fn pair(bound: usize) -> (Self, std::sync::mpsc::Sender<Vec<u8>>, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let (net_tx, rx) = std::sync::mpsc::channel();
+        let (tx, net_rx) = std::sync::mpsc::sync_channel(bound);
+        (Self { rx, tx }, net_tx, net_rx)
+    }
+}
+
+impl Adapter for ChannelAdapter {
+    fn read(&mut self) -> Option<Vec<u8>> {
+        // try_recv：数据面 poll 驱动，非阻塞；断了返回 None 让 poll 空转
+        self.rx.try_recv().ok()
+    }
+    fn write(&mut self, packet: &[u8]) {
+        // 队列满时丢弃（内核写线程卡住时不拖死数据面），与 NAT 容量语义一致
+        let _ = self.tx.try_send(packet.to_vec());
+    }
+}
+
 /// 把 Adapter 包装成 smoltcp Device。
 struct AdapterDevice<'a> {
     adapter: &'a mut dyn Adapter,
@@ -179,6 +208,22 @@ impl Dataplane {
         // DeviceStub 无包可读；发送队列通过 stub 间接验证。此方法保留给联调用。
         0
     }
+
+    /// 真实推进一轮：网卡 → smoltcp → 网卡。返回写回网卡的包数。
+    /// 由 daemon 的 netloop 周期调用（网卡线程经 ChannelAdapter 送包进来）。
+    pub fn pump(&mut self, adapter: &mut dyn Adapter) -> usize {
+        let out = {
+            let mut dev = AdapterDevice::new(adapter);
+            let _ = self.iface.poll(SmolInstant::now(), &mut dev, &mut self.sockets);
+            std::mem::take(&mut dev.tx_queue)
+        }; // dev（含 &mut adapter 借用）在此结束
+        let mut n = 0;
+        for p in out {
+            adapter.write(&p);
+            n += 1;
+        }
+        n
+    }
 }
 
 /// 无 IO 的 device stub，仅供 Interface::new 初始化。
@@ -227,5 +272,30 @@ mod tests {
         let mut dp = Dataplane::new([10, 8, 0, 2], 24);
         assert_eq!(dp.socket_count(), 0);
         assert_eq!(dp.poll_once(), 0);
+    }
+
+    #[test]
+    fn channel_adapter_bridges_threads() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let (mut adp, net_tx, net_rx) = ChannelAdapter::pair(8);
+        let stop = Arc::new(AtomicBool::new(false));
+        // 模拟 pump_in：内核包 → adapter.rx
+        let stop2 = Arc::clone(&stop);
+        let producer = std::thread::spawn(move || {
+            net_tx.send(vec![1, 2, 3]).unwrap();
+            while !stop2.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        // try_recv 非阻塞，等生产者线程把包送进来（最多 1s）
+        let got = (0..100).find_map(|_| adp.read().map_or_else(|| { std::thread::sleep(std::time::Duration::from_millis(10)); None }, Some));
+        assert_eq!(got.unwrap(), vec![1, 2, 3]);
+        assert!(adp.read().is_none());
+        // write → pump_out 线程收到
+        adp.write(&[9, 9]);
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(net_rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), vec![9, 9]);
+        producer.join().unwrap();
     }
 }

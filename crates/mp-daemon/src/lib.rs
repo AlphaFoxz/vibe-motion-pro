@@ -4,6 +4,8 @@
 use mp_core::profile::{Profile, ProfileError, ProfileStore};
 use mp_core::session::{Credentials, TunnelType};
 use mp_core::{Engine, VpnStatus};
+
+pub mod netloop;
 use mp_ipc::codec::{recv_request, send_response};
 use mp_ipc::profile::ProfileMsg;
 use mp_ipc::status::StatusSnapshot;
