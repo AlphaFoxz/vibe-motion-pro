@@ -10,4 +10,8 @@ pub enum Error {
     Protocol(String),
     #[error("session expired or kicked")]
     SessionInvalid,
+    #[error("state error: {0}")]
+    State(#[from] crate::state::StateError),
+    #[error("frame error: {0}")]
+    Frame(#[from] crate::frame::FrameError),
 }

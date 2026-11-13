@@ -1,15 +1,23 @@
-//! mp-core: MotionPro 协议核心（协议握手 / 会话 / 隧道状态机）。
-//! 具体实现按 docs/protocol-clues.md 的逆向结果逐步填充。
+//! mp-core: MotionPro 协议核心。
+//! 模块划分见 docs/plan-phase2.md。
 
+pub mod engine;
 pub mod error;
+pub mod frame;
+pub mod keepalive;
+pub mod protocol;
+pub mod reconnect;
 pub mod session;
+pub mod state;
 
+pub use engine::Engine;
 pub use error::Error;
+pub use state::{StateMachine, VpnStatus};
 
 /// 连接状态机，对齐原版三态（connected/disconnected/reconnecting）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VpnStatus {
+pub enum VpnStatusAlias {
     Disconnected,
     Connecting,
     Connected,

@@ -12,3 +12,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 smoltcp = { workspace = true }
+mp-ipc = { path = "../mp-ipc" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

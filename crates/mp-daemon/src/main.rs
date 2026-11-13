@@ -1,18 +1,24 @@
 //! mp-daemon: 特权守护进程（对应原版 vpnd.exe）。
-//! Windows: 服务 / macOS: launchd / Linux: systemd
-//! 职责：创建虚拟网卡（mp-platform）、运行隧道数据面（mp-core）、
-//! 通过 mp-ipc 接受 UI 进程指令。
+//! 逻辑在 lib.rs，此处仅启动 IPC server。
 
-use mp_core::VpnStatus;
+use mp_daemon::handle_conn;
+use mp_core::Engine;
+use mp_ipc::transport::TcpServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    tracing::info!("mp-daemon starting");
-    // TODO: 初始化 IPC server（named pipe / unix socket）
-    // TODO: 收到 start 指令后：mp-platform 建网卡 -> mp-core 建隧道 -> 写路由/DNS
-    tracing::info!(status = ?VpnStatus::Disconnected, "idle");
-    Ok(())
+    let addr = std::env::var("MP_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:62000".into());
+    let server = TcpServer::bind(&addr).await?;
+    tracing::info!("mp-daemon listening on {addr}");
+
+    let mut engine = Engine::new();
+    loop {
+        let mut conn = server.accept().await?;
+        if let Err(e) = handle_conn(&mut engine, &mut conn).await {
+            tracing::warn!("connection error: {e}");
+        }
+    }
 }
