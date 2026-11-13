@@ -82,9 +82,14 @@ impl RouteManager {
     }
 
     /// 添加一条到内网网段的路由（指向虚拟网卡）。成功后记录以便回滚。
+    /// Windows 下先删同前缀旧路由（前次会话残留会与本次竞争，且可能仍绑在
+    /// 物理网卡接口上 —— 真机实测 ping 时通时不通）。
     pub fn add_route(&mut self, cidr: &str) -> Result<(), PlatformError> {
         let argv = match std::env::consts::OS {
             "windows" => {
+                if let Ok(del) = windows_route_delete(cidr) {
+                    let _ = self.runner.run(&del); // 不存在时忽略失败
+                }
                 // 显式绑定接口索引，避免 wintun IP 注册竞态导致路由落到物理网卡
                 let if_index = crate::route::windows_if_index(&self.interface);
                 windows_route_add(cidr, &self.gateway, 25, if_index)

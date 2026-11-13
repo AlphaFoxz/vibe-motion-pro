@@ -212,11 +212,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(down.len(), 28);
-        // 上行：内核通道送包 → 隧道 → 回显 → 下行再收到
+        // 上行：内核通道送包 → 隧道 → 回显 → 下行再收到（目的地址须为单播，过滤拦截广播）
         let mut up = vec![0u8; 20];
         up[0] = 0x45;
         up[2..4].copy_from_slice(&20u16.to_be_bytes());
         up[9] = 6;
+        up[16..20].copy_from_slice(&[1, 2, 3, 4]);
         kernel_tx.send(up.clone()).await.unwrap();
         let echoed = tokio::time::timeout(Duration::from_secs(2), kernel_rx.recv())
             .await

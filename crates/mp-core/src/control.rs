@@ -393,6 +393,24 @@ impl ControlClient {
         }
     }
 
+    /// 注销：GET /prx/000/http/localhost/logout（带会话 cookie）。
+    /// 释放服务端会话，防止同账号隧道僵尸堆积（真机实测：反复重登不注销后，
+    /// 后续会话的转发被立即掐断）。返回 HTTP 状态码。
+    pub async fn logout(&self, cookie: &str) -> Result<u16, ControlError> {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = self.connect_tls().await?;
+        let req = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\n{BROWSER_LIKE_HEADERS}\
+             Cookie: ANStandalone=true;{cookie}\r\nConnection: Close\r\n\r\n",
+            crate::protocol::LOGOUT_PATH,
+            self.host
+        );
+        stream.write_all(req.as_bytes()).await?;
+        let (head, _body) = Self::read_response_raw(&mut stream).await?;
+        let resp = parse_response(&head)?;
+        Ok(resp.status)
+    }
+
     /// 读完整响应：返回 (头字节, 体字节)。
     /// 支持 Content-Length 精确读取与 Transfer-Encoding: chunked（真机网关用 chunked）。
     async fn read_response_raw(
@@ -546,6 +564,10 @@ impl ControlClient {
             common_payload.len(),
             String::from_utf8_lossy(&common_payload)
         );
+        // Q 帧为二进制结构（56B），落盘供离线分析
+        let dump_dir = std::path::PathBuf::from(std::env::temp_dir()).join("opencode");
+        let _ = std::fs::create_dir_all(&dump_dir);
+        let _ = std::fs::write(dump_dir.join("q_frame.bin"), &common_payload);
 
         // 'T' 网络配置请求（本机 IP 列表 + MAC）→ 'U' 响应（虚拟 IP/DNS）
         stream

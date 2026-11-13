@@ -24,6 +24,7 @@ pub async fn connect_with_login(
         Option<tunsetup::TunLink>,
         mp_core::protocol::PostloginApps,
         mp_core::protocol::NetworkConfig,
+        Option<(String, String)>,
     ),
     String,
 > {
@@ -176,7 +177,7 @@ pub async fn connect_with_login(
             None
         }
     };
-    Ok((pump, tun, apps, netcfg))
+    Ok((pump, tun, apps, netcfg, Some((tunnel_host.clone(), cookie))))
 }
 
 /// 本机所有 IPv4（'T' 请求载荷；取非环回地址）。
@@ -327,12 +328,37 @@ pub struct DaemonState {
     pub active_tunnel: Option<netloop::TunnelPump>,
     /// 活动网卡接线（路由/DNS 随 Drop 回滚）
     pub active_tun: Option<tunsetup::TunLink>,
+    /// 最近一次会话的（AG 主机, Cookie）——teardown 时发 logout 释放服务端会话
+    /// （反复重登不注销会在网关堆僵尸隧道，真机实测后续会话被立即拒转）
+    pub last_session: Option<(String, String)>,
 }
 
 impl DaemonState {
     pub fn new(profiles: ProfileStore) -> Self {
         let (status_tx, _) = broadcast::channel(16);
-        Self { engine: Engine::new(), profiles, status_tx, active_tunnel: None, active_tun: None }
+        Self {
+            engine: Engine::new(),
+            profiles,
+            status_tx,
+            active_tunnel: None,
+            active_tun: None,
+            last_session: None,
+        }
+    }
+
+    /// 异步注销：GET /prx/.../logout（带会话 cookie）。失败只记日志。
+    pub fn logout_last_session(&mut self) {
+        if let Some((host, cookie)) = self.last_session.take() {
+            tokio::spawn(async move {
+                match mp_core::control::ControlClient::new(&host, 443, true) {
+                    Ok(c) => match c.logout(&cookie).await {
+                        Ok(status) => tracing::info!("logout: {status}"),
+                        Err(e) => tracing::warn!("logout failed: {e}"),
+                    },
+                    Err(e) => tracing::warn!("logout client build failed: {e}"),
+                }
+            });
+        }
     }
 
     /// 每 1 秒调用一次（main.rs 里的轮询任务）：检测状态变化并广播。
@@ -364,6 +390,7 @@ impl DaemonState {
             if let Some(pump) = self.active_tunnel.take() {
                 tokio::spawn(pump.shutdown());
             }
+            self.logout_last_session();
             let _ = self.engine.stop();
         }
     }
@@ -407,8 +434,9 @@ pub fn handle_request(state: &mut DaemonState, req: &Request) -> Response {
             if let Some(pump) = state.active_tunnel.take() {
                 tokio::spawn(pump.shutdown());
             }
-            match engine.stop() {
-                Ok(_) => Response::Status { status: status_snapshot(engine) },
+            state.logout_last_session(); // 释放服务端会话（防僵尸堆积）
+            match state.engine.stop() {
+                Ok(_) => Response::Status { status: status_snapshot(&state.engine) },
                 Err(e) => Response::Error { message: e.to_string() },
             }
         }
@@ -452,14 +480,16 @@ async fn handle_connect(
     code: &str,
 ) -> Response {
     match connect_with_login(host, port, username, password, code).await {
-        Ok((pump, tun, apps, _netcfg)) => {
-            // 替换旧隧道与旧网卡
+        Ok((pump, tun, apps, _netcfg, session_info)) => {
+            // 替换旧隧道与旧网卡（旧会话先注销，避免服务端僵尸堆积）
+            state.logout_last_session();
             if let Some(mut old_tun) = state.active_tun.take() {
                 old_tun.teardown();
             }
             if let Some(old) = state.active_tunnel.take() {
                 tokio::spawn(old.shutdown());
             }
+            state.last_session = session_info;
             state.active_tunnel = Some(pump);
             state.active_tun = tun;
             let creds = Credentials {

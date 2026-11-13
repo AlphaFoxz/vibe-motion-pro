@@ -200,6 +200,34 @@ pub fn pump_once(
 /// - `stream`：数据模式 TLS 流（`ControlClient::open_tunnel` 的返回值）
 /// - `tun`：TUN 适配器（mp-platform ChannelAdapter）
 /// - 停止：`stop` 置位后返回 Ok(())
+/// TUN 出站过滤：只转发正经的单播业务包。
+/// - IPv4：组播(224/4)、受限广播(255.255.255.255)、子网定向广播(主机位全 1 的
+///   /24 启发式)、环回(127/8)、0.0.0.0、保留段(240+/8) 全部丢弃
+/// - IPv6：组播(ff00::/8)与链路本地(fe80::/10，ND/MLD 噪音)丢弃
+pub fn should_forward(pkt: &[u8]) -> bool {
+    let ver = pkt.first().map(|b| b >> 4).unwrap_or(0);
+    match ver {
+        4 => {
+            if pkt.len() < 20 {
+                return false;
+            }
+            let dst = &pkt[16..20];
+            !(dst[0] >= 224 // 组播 + 保留
+                || dst == [255, 255, 255, 255]
+                || dst[0] == 127
+                || dst == [0, 0, 0, 0]
+                || dst[3] == 0xff) // 子网定向广播启发式
+        }
+        6 => {
+            if pkt.len() < 40 {
+                return false;
+            }
+            !(pkt[0] == 0xff || (pkt[0] == 0xfe && (pkt[1] & 0xc0) == 0x80))
+        }
+        _ => false,
+    }
+}
+
 pub async fn pump_async<S>(
     stream: &mut S,
     tun: &mut (dyn Adapter + Send),
@@ -279,8 +307,14 @@ where
             }
             _ = sleep(TokioDuration::from_millis(POLL_MS)) => {}
         }
-        // 2) TUN → 隧道（裸 IP 直传）；只记单播数据包（组播/广播是噪音）
+        // 2) TUN → 隧道（裸 IP 直传）；写带 5s 看门狗：网关停止收数据时 TCP 缓冲
+        //    打满会无限阻塞（真机实测冻结 2 分 23 秒），必须快速判死让 reap 清理。
+        //    组播/广播/链路本地包不转发（原版 NDIS 驱动在内核层就滤掉了；
+        //    Windows 新网卡的 LLMNR/mDNS/ND 噪音会灌爆网关并疑似触发转发惩罚）。
         while let Some(pkt) = tun.read() {
+            if !should_forward(&pkt) {
+                continue;
+            }
             if pkt.first() == Some(&0x45)
                 && pkt[16..20] != [224, 0, 0, 0] /*非组播*/
                 && !(pkt[16] >= 224)
@@ -294,15 +328,35 @@ where
                     pkt[9]
                 );
             }
-            stream.write_all(&pkt).await?;
+            match tokio::time::timeout(TokioDuration::from_secs(5), stream.write_all(&pkt)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return Err(PumpError::Io(e)),
+                Err(_) => {
+                    tracing::error!("tunnel write stalled >5s (gateway not draining), declaring dead");
+                    return Err(PumpError::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "tunnel write stalled",
+                    )));
+                }
+            }
             stats.packets_out += 1;
             stats.bytes_out += pkt.len() as u64;
         }
-        // 3) keepalive
+        // 3) keepalive（同样带 5s 看门狗）
         match ka.tick() {
             KeepaliveVerdict::SendNow => {
                 let frame = ka.send_keepalive(day_ms(std::time::SystemTime::now()));
-                stream.write_all(&frame.encode()).await?;
+                match tokio::time::timeout(TokioDuration::from_secs(5), stream.write_all(&frame.encode())).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(PumpError::Io(e)),
+                    Err(_) => {
+                        tracing::error!("keepalive write stalled >5s, declaring dead");
+                        return Err(PumpError::Io(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "keepalive write stalled",
+                        )));
+                    }
+                }
                 stats.keepalives_sent += 1;
             }
             KeepaliveVerdict::Dead => return Err(PumpError::Dead),
@@ -528,10 +582,12 @@ mod tests {
         assert_eq!(down[0], 0x45);
 
         // 上行：TUN 通道送一个包，泵应原样发到隧道（对端回显 → 再从下行收到）
+        // 注意目的地址必须是单播（组播/广播/未指定地址会被出站过滤器拦截）
         let mut up = vec![0u8; 20];
         up[0] = 0x45;
         up[2..4].copy_from_slice(&20u16.to_be_bytes());
         up[9] = 6;
+        up[16..20].copy_from_slice(&[1, 2, 3, 4]);
         net_tx.send(up.clone()).unwrap();
         let echoed = net_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(echoed, up);
