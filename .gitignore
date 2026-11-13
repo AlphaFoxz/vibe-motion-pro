@@ -8,3 +8,6 @@ reference/config/server.p12
 *.etl
 *.pcapng
 *.pcap
+
+# 逆向参考样本不入库（存内部存储，见 CHECKSUMS.md5 校验）
+reference/

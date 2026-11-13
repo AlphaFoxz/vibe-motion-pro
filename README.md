@@ -21,10 +21,12 @@ crates/
   mp-platform  各平台虚拟网卡/路由/DNS 封装
   mp-ipc       UI <-> daemon 本地 IPC（ndjson over loopback）
 app/           Tauri 2 前端
-reference/     原版 v1.2.26 二进制与配置（逆向参考资产）
-docs/          逆向线索 / 运行时取证 / 功能基线 / 阶段计划
+docs/          逆向线索 / 运行时取证 / 功能基线 / 阶段计划（含原版样本校验和）
 scripts/       抓包解析、图标生成等辅助脚本
 ```
+
+> 原版 v1.2.26 逆向参考样本（二进制/安装包，约 95MB）**不入库**，存于内部存储；
+> 完整性校验见 [`docs/reference-checksums.md5`](docs/reference-checksums.md5)，放到本地 `reference/` 目录即与文档配套使用。
 
 ## 现状
 
@@ -32,7 +34,7 @@ scripts/       抓包解析、图标生成等辅助脚本
 - [x] 阶段1：monorepo 骨架，33 个测试全绿（Windows MSVC）
 - [x] 阶段2：IPC / 状态机 / 重连退避 / 隧道帧编解码 / smoltcp 数据面骨架
 - [x] 阶段3（部分）：Tauri UI 骨架 + 托盘 + IPC 桥接
-- [ ] 协议帧格式逆向（Ghidra 深度分析 vl3vpn.dll）
+- [ ] 协议帧格式逆向（Ghidra 深度分析 vl3vpn.dll，样本在内部存储 reference/）
 - [ ] UI 功能对齐、安装分发、验证发布
 
 详见 [TODO.md](TODO.md)。
