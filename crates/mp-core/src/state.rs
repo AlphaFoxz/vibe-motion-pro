@@ -6,10 +6,14 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VpnStatus {
+    /// -1/unknown 映射为 Disconnected 处理，另含细化态（route.cpp 枚举）
     Disconnected,
+    Disconnecting,
     Connecting,
+    ConnectFailed,
     Connected,
     Reconnecting,
+    ReconnectFailed,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -31,22 +35,33 @@ impl StateMachine {
         self.status
     }
 
-    /// 状态迁移表：
-    /// Disconnected  -> Connecting
-    /// Connecting    -> Connected | Disconnected(失败) | Reconnecting(半断开)
-    /// Connected     -> Reconnecting(断线) | Disconnected(主动停止)
-    /// Reconnecting  -> Connected(恢复) | Disconnected(放弃/停止)
+    /// 状态迁移表（对齐原版 route.cpp 枚举，见 docs/runtime-forensics.md）：
+    /// Disconnected    -> Connecting | Disconnecting
+    /// Connecting      -> Connected | ConnectFailed | Disconnected(取消) | Reconnecting
+    /// ConnectFailed   -> Disconnected | Connecting(重试)
+    /// Connected       -> Reconnecting(断线) | Disconnecting(主动停止)
+    /// Reconnecting    -> Connected(恢复) | ReconnectFailed | Disconnected(放弃/停止)
+    /// ReconnectFailed -> Disconnected | Connecting(手动重试)
+    /// Disconnecting   -> Disconnected
     pub fn transition(&mut self, to: VpnStatus) -> Result<VpnStatus, StateError> {
         let allowed = match (self.status, to) {
             (VpnStatus::Disconnected, VpnStatus::Connecting) => true,
+            (VpnStatus::Disconnected, VpnStatus::Disconnecting) => true,
             (VpnStatus::Connecting, VpnStatus::Connected) => true,
+            (VpnStatus::Connecting, VpnStatus::ConnectFailed) => true,
             (VpnStatus::Connecting, VpnStatus::Disconnected) => true,
             (VpnStatus::Connecting, VpnStatus::Reconnecting) => true,
+            (VpnStatus::ConnectFailed, VpnStatus::Disconnected) => true,
+            (VpnStatus::ConnectFailed, VpnStatus::Connecting) => true,
             (VpnStatus::Connected, VpnStatus::Reconnecting) => true,
-            (VpnStatus::Connected, VpnStatus::Disconnected) => true,
+            (VpnStatus::Connected, VpnStatus::Disconnecting) => true,
             (VpnStatus::Reconnecting, VpnStatus::Connected) => true,
+            (VpnStatus::Reconnecting, VpnStatus::ReconnectFailed) => true,
             (VpnStatus::Reconnecting, VpnStatus::Disconnected) => true,
             (VpnStatus::Reconnecting, VpnStatus::Reconnecting) => true, // 重连尝试再次失败
+            (VpnStatus::ReconnectFailed, VpnStatus::Disconnected) => true,
+            (VpnStatus::ReconnectFailed, VpnStatus::Connecting) => true,
+            (VpnStatus::Disconnecting, VpnStatus::Disconnected) => true,
             _ => false,
         };
         if !allowed {

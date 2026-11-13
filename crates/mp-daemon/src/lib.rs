@@ -11,7 +11,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 fn status_snapshot(e: &Engine) -> StatusSnapshot {
     let mut snap = StatusSnapshot::disconnected();
     snap.state = match e.status() {
-        VpnStatus::Disconnected => "disconnected",
+        VpnStatus::Disconnected | VpnStatus::ConnectFailed | VpnStatus::ReconnectFailed => "disconnected",
+        VpnStatus::Disconnecting => "disconnecting",
         VpnStatus::Connecting => "connecting",
         VpnStatus::Connected => "connected",
         VpnStatus::Reconnecting => "reconnecting",
