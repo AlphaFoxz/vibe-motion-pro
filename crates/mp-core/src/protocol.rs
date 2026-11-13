@@ -16,6 +16,17 @@ pub const POSTLOGIN_APPS_PATH: &str = "/prx/000/http/localhost:65200/motionpro/p
 /// 数据隧道通道（静态证据 vl3vpn.dll：`GET %s/vpntunnel HTTP/1.1`）。
 pub const VPNTUNNEL_PATH: &str = "/vpntunnel";
 
+/// 登出端点（HAR 取证：an_welcome.js，见 docs/har-forensics.md）。
+pub const LOGOUT_PATH: &str = "/prx/000/http/localhost/logout";
+
+/// 企业 SSO 登录页验证码（HAR 取证：/restservice/vpnLogin/getImage）。
+pub const CAPTCHA_PATH: &str = "/restservice/vpnLogin/getImage";
+
+/// 本地 web portal 双 WebSocket（对齐原版 MotionProHttpd 60012）：
+/// ws/command = 请求通道，ws/notify = 状态推送通道（与 mp-ipc + tick_broadcast 同构）。
+pub const PORTAL_WS_COMMAND: &str = "/ws/command";
+pub const PORTAL_WS_NOTIFY: &str = "/ws/notify";
+
 /// 服务器 Keep-Alive 头（实测 `timeout=15, max=100`）。
 pub const SERVER_KEEPALIVE_TIMEOUT_SECS: u64 = 15;
 
