@@ -67,9 +67,16 @@
      - [ ] 完整请求头列表（Host / Cookie / 其他自定义头，如 validcode、MotionPro-web）
      - [ ] 响应 200 后如何切换到数据模式（同连接升级？还是新连接？）
      - [ ] session_id / sslproto / tunneltype 参数从哪携带
-- 已知上下文（runtime-forensics.md）：TLS 1.2 → tunnel socket → an_login.js → cookie 复用
+ - 已知上下文（runtime-forensics.md）：TLS 1.2 → tunnel socket → an_login.js → cookie 复用
 - 结论：
-  - （待填）
+  - **请求格式**（两个变体，均 `GET /prx/000/http/localhost/vpntunnel HTTP/1.1`，同连接发送后切二进制模式）：
+    1. TCS 辅助通道（`array_vpn_tcs_connect` @10054e00，common.c；DNS 解析等）：
+       `Cookie: %s` + `appid: SSPVPN` + `clientid: %s` + `Appid:DesktopDirect`
+    2. 主数据隧道（`FUN_1005cc10`，get_config.c）额外携带：
+       `Cookie: ANStandalone=true;%s` + `x-devtype: %d` + `cpuid: %s` + `hostname: %s` + `PAYLOAD-IP-VERSION: 6`（IPv6 模式）
+  - **响应**：要求 `HTTP/1.1 200 OK`；`201 OK` = 新版 **JSON 协议**（体即 JSON，置 json_protocol 标志）；`302 Redirect` 拒绝
+  - **模式切换**：同一 TLS 连接，读完 HTTP 头立即切二进制帧（见 T3），无新连接
+  - [x] 完整请求头；[x] 切换方式（同连接升级）；[x] 参数经 cookie + 自定义 header 携带
 
 ## T3 隧道数据封送（核心）
 
@@ -77,11 +84,18 @@
 - 步骤：
   1. 找 write/read tunnel 的函数（错误字符串 XREF）
   2. 回答：
-     - [ ] 帧头结构（是否有 magic/长度/类型字段 —— 我们的占位设计 MPFR 待替换）
-     - [ ] 内层 IP 包是否分片重组（MTU 1400 实测）
+     - [x] 帧头结构（是否有 magic/长度/类型字段 —— 我们的占位设计 MPFR 待替换）
+     - [x] 内层 IP 包是否分片重组（MTU 1400 实测）
      - [ ] 压缩/加密是否在 TLS 之外还有一层
 - 结论：
-  - （待填）
+  - **数据面 = TLS 上跑裸 IP 包流，无任何额外封装头**（读循环 `FUN_10063130`，l3vpn.c 0x35b-0x3b4）：
+    - `SSL_read` 入 64KB 缓冲（0x10000），缓冲内容为背靠背的原始 IPv4/IPv6 包
+    - 首半字节 `0x60`=IPv6（+4 BE 载荷长 + 头 40B），否则 IPv4（+2 BE 总长）
+    - 半包累积、一读多包、残余保留 —— **只做切包，不做重组**（IP 分片由内核/网卡 MTU 保证，MTU 1400）
+  - **keepalive 即伪 IPv4 包**：`45 00 00 14` = 版本4+IHL5 / TOS=0 / 总长 BE 0x0014=20；+8 字节 `00 ff 00 00` = **TTL=0、协议号=255、校验和=0**；读循环 `proto==0xff` 特判走 keepalive 处理（FUN_10062270）—— 协议设计为同一裸 IP 流统一分发
+  - 16 字节配置帧（HTTP 200 后，同一连接）：`[0]=消息类型字符，[4]=载荷长度`，客户端发 `'P'`（0x50），服务端响应 `'Q'`=通用配置 JSON、`'U'`=网络配置 JSON；随后普通配置请求体 0x30B、另有 0x10B 交换（TCS 通道起始帧首字节 0x0f；DNS 解析帧首字节 0x14、BE 长度在 +12、载荷主机名在 +16）
+  - 实测对齐：85B/181B/133B TLS record = TLS 开销 + 内层裸 IP 包；**~200ms 小流量是内层 TCP 心跳，非 l3vpn keepalive（30s）**
+  - **对重写的影响：删除 mp-core frame 的 MPFR 占位设计，直接实现「TLS 流 ⇄ 裸 IP 包切包器」**
 
 ## T4 UDP/DTLS 隧道
 
