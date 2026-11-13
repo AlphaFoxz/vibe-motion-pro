@@ -17,7 +17,12 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        Self { sm: StateMachine::new(), reconnect: ReconnectPolicy::default(), session: None, reconnect_attempt: 0 }
+        Self {
+            sm: StateMachine::new(),
+            reconnect: ReconnectPolicy::default(),
+            session: None,
+            reconnect_attempt: 0,
+        }
     }
 
     pub fn status(&self) -> VpnStatus {
@@ -29,7 +34,11 @@ impl Engine {
     }
 
     /// 发起连接（对应 ArrayStartVPNClient）。
-    pub fn start(&mut self, _creds: &Credentials, tunnel: TunnelType) -> Result<VpnStatus, crate::Error> {
+    pub fn start(
+        &mut self,
+        _creds: &Credentials,
+        tunnel: TunnelType,
+    ) -> Result<VpnStatus, crate::Error> {
         match self.sm.status() {
             VpnStatus::Disconnected => {
                 self.sm.transition(VpnStatus::Connecting)?;
@@ -43,16 +52,21 @@ impl Engine {
                 self.sm.transition(VpnStatus::Connected)?;
                 Ok(self.sm.status())
             }
-            s => Err(crate::Error::Protocol(format!("cannot start from state {s:?}"))),
+            s => Err(crate::Error::Protocol(format!(
+                "cannot start from state {s:?}"
+            ))),
         }
     }
 
-    /// 主动断开（对应 ArrayStopVPNClient）。
+    /// 主动断开（对应 ArrayStopVPNClient）。先 Disconnecting 再 Disconnected。
     pub fn stop(&mut self) -> Result<VpnStatus, crate::Error> {
         match self.sm.status() {
             VpnStatus::Disconnected => Ok(VpnStatus::Disconnected),
             _ => {
                 self.session = None;
+                if self.sm.status() != VpnStatus::Disconnecting {
+                    self.sm.transition(VpnStatus::Disconnecting)?;
+                }
                 self.sm.transition(VpnStatus::Disconnected)?;
                 self.reconnect_attempt = 0;
                 Ok(self.sm.status())
@@ -62,7 +76,10 @@ impl Engine {
 
     /// 数据面/心跳报告连接丢失，进入重连（对应 ArrayMonitorKeepaliveStatus 断链）。
     pub fn on_link_dead(&mut self) -> Result<(VpnStatus, Option<u64>), crate::Error> {
-        if matches!(self.sm.status(), VpnStatus::Connected | VpnStatus::Connecting | VpnStatus::Reconnecting) {
+        if matches!(
+            self.sm.status(),
+            VpnStatus::Connected | VpnStatus::Connecting | VpnStatus::Reconnecting
+        ) {
             if self.reconnect.should_retry(self.reconnect_attempt) {
                 self.sm.transition(VpnStatus::Reconnecting)?;
                 let delay = self.reconnect.delay_ms(self.reconnect_attempt);
@@ -73,7 +90,10 @@ impl Engine {
                 Ok((VpnStatus::Disconnected, None))
             }
         } else {
-            Err(crate::Error::Protocol(format!("link dead in state {:?}", self.sm.status())))
+            Err(crate::Error::Protocol(format!(
+                "link dead in state {:?}",
+                self.sm.status()
+            )))
         }
     }
 
@@ -93,7 +113,9 @@ impl Engine {
 /// 简单 UUID v4（避免为骨架引入依赖）。
 fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     format!("{:x}-{:x}", t.as_nanos(), std::process::id())
 }
 
@@ -102,7 +124,12 @@ mod tests {
     use super::*;
 
     fn creds() -> Credentials {
-        Credentials { username: "u".into(), password: "p".into(), aaa_method: None, hwid: None }
+        Credentials {
+            username: "u".into(),
+            password: "p".into(),
+            aaa_method: None,
+            hwid: None,
+        }
     }
 
     #[test]

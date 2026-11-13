@@ -10,7 +10,12 @@ pub struct ReconnectPolicy {
 
 impl Default for ReconnectPolicy {
     fn default() -> Self {
-        Self { enabled: true, max_attempts: 5, base_delay_ms: 1000, max_delay_ms: 30_000 }
+        Self {
+            enabled: true,
+            max_attempts: 5,
+            base_delay_ms: 1000,
+            max_delay_ms: 30_000,
+        }
     }
 }
 
@@ -32,7 +37,11 @@ mod tests {
 
     #[test]
     fn exponential_backoff_capped() {
-        let p = ReconnectPolicy { base_delay_ms: 1000, max_delay_ms: 8000, ..Default::default() };
+        let p = ReconnectPolicy {
+            base_delay_ms: 1000,
+            max_delay_ms: 8000,
+            ..Default::default()
+        };
         assert_eq!(p.delay_ms(0), 1000);
         assert_eq!(p.delay_ms(1), 2000);
         assert_eq!(p.delay_ms(2), 4000);
@@ -43,7 +52,11 @@ mod tests {
 
     #[test]
     fn retry_limit() {
-        let p = ReconnectPolicy { enabled: true, max_attempts: 3, ..Default::default() };
+        let p = ReconnectPolicy {
+            enabled: true,
+            max_attempts: 3,
+            ..Default::default()
+        };
         assert!(p.should_retry(0));
         assert!(p.should_retry(2));
         assert!(!p.should_retry(3));
@@ -51,7 +64,10 @@ mod tests {
 
     #[test]
     fn disabled_no_retry() {
-        let p = ReconnectPolicy { enabled: false, ..Default::default() };
+        let p = ReconnectPolicy {
+            enabled: false,
+            ..Default::default()
+        };
         assert!(!p.should_retry(0));
     }
 }

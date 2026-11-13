@@ -12,7 +12,9 @@ pub struct TcpServer {
 
 impl TcpServer {
     pub async fn bind(addr: &str) -> Result<Self, IpcError> {
-        Ok(Self { listener: TcpListener::bind(addr).await? })
+        Ok(Self {
+            listener: TcpListener::bind(addr).await?,
+        })
     }
 
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, IpcError> {

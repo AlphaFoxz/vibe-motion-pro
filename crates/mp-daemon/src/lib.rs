@@ -11,7 +11,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 fn status_snapshot(e: &Engine) -> StatusSnapshot {
     let mut snap = StatusSnapshot::disconnected();
     snap.state = match e.status() {
-        VpnStatus::Disconnected | VpnStatus::ConnectFailed | VpnStatus::ReconnectFailed => "disconnected",
+        VpnStatus::Disconnected | VpnStatus::ConnectFailed | VpnStatus::ReconnectFailed => {
+            "disconnected"
+        }
         VpnStatus::Disconnecting => "disconnecting",
         VpnStatus::Connecting => "connecting",
         VpnStatus::Connected => "connected",
@@ -35,19 +37,32 @@ pub fn handle_request(engine: &mut Engine, req: &Request) -> Response {
                 hwid: None,
             };
             match engine.start(&creds, TunnelType::Tcp) {
-                Ok(_) => Response::Status { status: status_snapshot(engine) },
-                Err(e) => Response::Error { message: e.to_string() },
+                Ok(_) => Response::Status {
+                    status: status_snapshot(engine),
+                },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
             }
         }
         Request::Stop => match engine.stop() {
-            Ok(_) => Response::Status { status: status_snapshot(engine) },
-            Err(e) => Response::Error { message: e.to_string() },
+            Ok(_) => Response::Status {
+                status: status_snapshot(engine),
+            },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
         },
-        Request::Status => Response::Status { status: status_snapshot(engine) },
+        Request::Status => Response::Status {
+            status: status_snapshot(engine),
+        },
         Request::GetSession => Response::Session {
             session_id: engine.session().map(|s| s.session_id.clone()),
         },
-        Request::SetReconnect { enabled, max_attempts } => {
+        Request::SetReconnect {
+            enabled,
+            max_attempts,
+        } => {
             engine.set_reconnect(*enabled, *max_attempts);
             Response::Ok
         }
@@ -56,7 +71,10 @@ pub fn handle_request(engine: &mut Engine, req: &Request) -> Response {
 }
 
 /// 在一条连接上循环处理请求直到对端关闭。
-pub async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(engine: &mut Engine, stream: &mut S) -> anyhow::Result<()> {
+pub async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
+    engine: &mut Engine,
+    stream: &mut S,
+) -> anyhow::Result<()> {
     use mp_ipc::IpcError;
     loop {
         let req = match recv_request(stream).await {
@@ -87,14 +105,23 @@ mod tests {
         let res = recv_response(&mut client).await.unwrap();
         assert!(matches!(res, Response::Status { .. }));
 
-        send_request(&Request::Start { profile_id: "prof1".into() }, &mut client).await.unwrap();
+        send_request(
+            &Request::Start {
+                profile_id: "prof1".into(),
+            },
+            &mut client,
+        )
+        .await
+        .unwrap();
         let res = recv_response(&mut client).await.unwrap();
         match res {
             Response::Status { status } => assert_eq!(status.state, "connected"),
             other => panic!("unexpected: {other:?}"),
         }
 
-        send_request(&Request::GetSession, &mut client).await.unwrap();
+        send_request(&Request::GetSession, &mut client)
+            .await
+            .unwrap();
         let res = recv_response(&mut client).await.unwrap();
         match res {
             Response::Session { session_id } => assert!(session_id.is_some()),

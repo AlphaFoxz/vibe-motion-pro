@@ -67,7 +67,8 @@ impl ValidString {
         let mut out = Self::default();
         for part in s.split('#') {
             if let Some(v) = part.strip_prefix("validcode=") {
-                out.validcode = v.to_string();
+                // '@' 是多字段分隔符（如 validcode=@#motionProweb=1）
+                out.validcode = v.trim_end_matches('@').to_string();
             } else if part == "motionProweb=1" {
                 out.motion_pro_web = true;
             }
@@ -157,7 +158,12 @@ mod tests {
     #[test]
     fn postlogin_request_format() {
         let r = postlogin_apps_request("h", "YB8302", "***", "default");
-        assert!(r.contains("_uname=YB8302&_role=&_pid=***& _instid=default".replace(' ', "").as_str())
-            || r.contains("_uname=YB8302&_role=&_pid=***&_instid=default"));
+        assert!(
+            r.contains(
+                "_uname=YB8302&_role=&_pid=***& _instid=default"
+                    .replace(' ', "")
+                    .as_str()
+            ) || r.contains("_uname=YB8302&_role=&_pid=***&_instid=default")
+        );
     }
 }

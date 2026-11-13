@@ -12,7 +12,9 @@ pub async fn send<T: Serialize, W: AsyncWrite + Unpin>(msg: &T, w: &mut W) -> Re
     Ok(())
 }
 
-pub async fn recv<T: for<'de> Deserialize<'de>, R: AsyncRead + Unpin>(r: &mut R) -> Result<T, IpcError> {
+pub async fn recv<T: for<'de> Deserialize<'de>, R: AsyncRead + Unpin>(
+    r: &mut R,
+) -> Result<T, IpcError> {
     let mut line = String::new();
     let n = BufReader::new(r).read_line(&mut line).await?;
     if n == 0 {
@@ -29,7 +31,10 @@ pub async fn recv_request<R: AsyncRead + Unpin>(r: &mut R) -> Result<Request, Ip
     recv(r).await
 }
 
-pub async fn send_response<W: AsyncWrite + Unpin>(res: &Response, w: &mut W) -> Result<(), IpcError> {
+pub async fn send_response<W: AsyncWrite + Unpin>(
+    res: &Response,
+    w: &mut W,
+) -> Result<(), IpcError> {
     send(res, w).await
 }
 
@@ -50,7 +55,9 @@ mod tests {
     #[tokio::test]
     async fn request_roundtrip() {
         let (mut a, mut b) = duplex_pair().await;
-        let req = Request::Start { profile_id: "p1".into() };
+        let req = Request::Start {
+            profile_id: "p1".into(),
+        };
         send_request(&req, &mut a).await.unwrap();
         let got = recv_request(&mut b).await.unwrap();
         assert_eq!(got, req);

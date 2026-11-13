@@ -1,8 +1,8 @@
 //! mp-daemon: 特权守护进程（对应原版 vpnd.exe）。
 //! 逻辑在 lib.rs，此处仅启动 IPC server。
 
-use mp_daemon::handle_conn;
 use mp_core::Engine;
+use mp_daemon::handle_conn;
 use mp_ipc::transport::TcpServer;
 
 #[tokio::main]

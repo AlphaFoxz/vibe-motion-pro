@@ -12,7 +12,12 @@ pub struct KeepaliveMonitor {
 
 impl KeepaliveMonitor {
     pub fn new(interval: Duration, max_misses: u32) -> Self {
-        Self { interval, max_misses, last_seen: Instant::now(), misses: 0 }
+        Self {
+            interval,
+            max_misses,
+            last_seen: Instant::now(),
+            misses: 0,
+        }
     }
 
     /// 收到对端任何报文（KeepAlive 或 Data）即调用。

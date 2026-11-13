@@ -13,6 +13,11 @@ pub struct StatusSnapshot {
 
 impl StatusSnapshot {
     pub fn disconnected() -> Self {
-        Self { state: "disconnected".into(), rtt_ms: None, server_ip: None, client_ip: None }
+        Self {
+            state: "disconnected".into(),
+            rtt_ms: None,
+            server_ip: None,
+            client_ip: None,
+        }
     }
 }

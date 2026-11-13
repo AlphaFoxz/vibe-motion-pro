@@ -96,7 +96,10 @@ impl Frame {
         if buf.len() < total {
             return Err(FrameError::Incomplete(buf.len(), total));
         }
-        let frame = Frame { ftype, payload: buf[HEADER_LEN..total].to_vec() };
+        let frame = Frame {
+            ftype,
+            payload: buf[HEADER_LEN..total].to_vec(),
+        };
         Ok((frame, total))
     }
 }
@@ -108,7 +111,9 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new() -> Self {
-        Self { buf: Vec::with_capacity(HEADER_LEN + 1500) }
+        Self {
+            buf: Vec::with_capacity(HEADER_LEN + 1500),
+        }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -153,35 +158,53 @@ mod tests {
     fn rejects_bad_magic() {
         let mut bytes = Frame::new(FrameType::Data, b"x").unwrap().encode();
         bytes[0] ^= 0xFF;
-        assert!(matches!(Frame::decode(&bytes), Err(FrameError::BadMagic(_))));
+        assert!(matches!(
+            Frame::decode(&bytes),
+            Err(FrameError::BadMagic(_))
+        ));
     }
 
     #[test]
     fn rejects_bad_version() {
         let mut bytes = Frame::new(FrameType::Data, b"x").unwrap().encode();
         bytes[4] = 99;
-        assert!(matches!(Frame::decode(&bytes), Err(FrameError::BadVersion(99))));
+        assert!(matches!(
+            Frame::decode(&bytes),
+            Err(FrameError::BadVersion(99))
+        ));
     }
 
     #[test]
     fn rejects_bad_type() {
         let mut bytes = Frame::new(FrameType::Data, b"x").unwrap().encode();
         bytes[5] = 0x7F;
-        assert!(matches!(Frame::decode(&bytes), Err(FrameError::BadType(0x7F))));
+        assert!(matches!(
+            Frame::decode(&bytes),
+            Err(FrameError::BadType(0x7F))
+        ));
     }
 
     #[test]
     fn incomplete_then_complete() {
         let bytes = Frame::new(FrameType::Data, b"payload").unwrap().encode();
-        assert!(matches!(Frame::decode(&bytes[..4]), Err(FrameError::Incomplete(4, 8))));
-        assert!(matches!(Frame::decode(&bytes[..9]), Err(FrameError::Incomplete(9, 15))));
+        assert!(matches!(
+            Frame::decode(&bytes[..4]),
+            Err(FrameError::Incomplete(4, 8))
+        ));
+        assert!(matches!(
+            Frame::decode(&bytes[..9]),
+            Err(FrameError::Incomplete(9, 15))
+        ));
         let (f, _) = Frame::decode(&bytes).unwrap();
         assert_eq!(f.payload, b"payload");
     }
 
     #[test]
     fn payload_too_large() {
-        assert_eq!(Frame::new(FrameType::Data, vec![0u8; MAX_PAYLOAD + 1]).unwrap_err(), FrameError::TooLarge(MAX_PAYLOAD + 1));
+        assert_eq!(
+            Frame::new(FrameType::Data, vec![0u8; MAX_PAYLOAD + 1]).unwrap_err(),
+            FrameError::TooLarge(MAX_PAYLOAD + 1)
+        );
     }
 
     #[test]

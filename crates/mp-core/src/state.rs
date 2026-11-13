@@ -28,7 +28,9 @@ pub struct StateMachine {
 
 impl StateMachine {
     pub fn new() -> Self {
-        Self { status: VpnStatus::Disconnected }
+        Self {
+            status: VpnStatus::Disconnected,
+        }
     }
 
     pub fn status(&self) -> VpnStatus {
@@ -59,6 +61,7 @@ impl StateMachine {
             (VpnStatus::Reconnecting, VpnStatus::ReconnectFailed) => true,
             (VpnStatus::Reconnecting, VpnStatus::Disconnected) => true,
             (VpnStatus::Reconnecting, VpnStatus::Reconnecting) => true, // 重连尝试再次失败
+            (VpnStatus::Reconnecting, VpnStatus::Disconnecting) => true, // 重连中手动停止
             (VpnStatus::ReconnectFailed, VpnStatus::Disconnected) => true,
             (VpnStatus::ReconnectFailed, VpnStatus::Connecting) => true,
             (VpnStatus::Disconnecting, VpnStatus::Disconnected) => true,
@@ -87,6 +90,7 @@ mod tests {
         let mut sm = StateMachine::new();
         sm.transition(VpnStatus::Connecting).unwrap();
         sm.transition(VpnStatus::Connected).unwrap();
+        sm.transition(VpnStatus::Disconnecting).unwrap();
         sm.transition(VpnStatus::Disconnected).unwrap();
         assert_eq!(sm.status(), VpnStatus::Disconnected);
     }
@@ -110,6 +114,12 @@ mod tests {
         assert!(sm.transition(VpnStatus::Reconnecting).is_err());
         sm.transition(VpnStatus::Connecting).unwrap();
         // Connecting 不能直接 Connecting
-        assert_eq!(sm.transition(VpnStatus::Connecting), Err(StateError::Illegal(VpnStatus::Connecting, VpnStatus::Connecting)));
+        assert_eq!(
+            sm.transition(VpnStatus::Connecting),
+            Err(StateError::Illegal(
+                VpnStatus::Connecting,
+                VpnStatus::Connecting
+            ))
+        );
     }
 }

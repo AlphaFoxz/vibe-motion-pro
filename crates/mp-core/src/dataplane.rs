@@ -8,7 +8,7 @@
 //! TODO(逆向): 原版 vl3vpn 的会话分流/NAT 细节（隧道内 IP 分配、TAF 规则）确认后完善。
 
 use smoltcp::iface::{Config, Interface, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, RxToken, TxToken, Medium};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use std::collections::VecDeque;
@@ -67,7 +67,10 @@ struct AdapterDevice<'a> {
 
 impl<'a> AdapterDevice<'a> {
     fn new(adapter: &'a mut dyn Adapter) -> Self {
-        Self { adapter, tx_queue: VecDeque::new() }
+        Self {
+            adapter,
+            tx_queue: VecDeque::new(),
+        }
     }
 }
 
@@ -103,19 +106,32 @@ impl TxToken for AdapterTxToken<'_> {
 }
 
 impl Device for AdapterDevice<'_> {
-    type RxToken<'a> = AdapterRxToken<'a> where Self: 'a;
-    type TxToken<'a> = AdapterTxToken<'a> where Self: 'a;
+    type RxToken<'a>
+        = AdapterRxToken<'a>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = AdapterTxToken<'a>
+    where
+        Self: 'a;
 
     fn receive(&mut self, _t: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let buf = self.adapter.read()?;
         Some((
-            AdapterRxToken { buf, _marker: std::marker::PhantomData },
-            AdapterTxToken { queue: &mut self.tx_queue },
+            AdapterRxToken {
+                buf,
+                _marker: std::marker::PhantomData,
+            },
+            AdapterTxToken {
+                queue: &mut self.tx_queue,
+            },
         ))
     }
 
     fn transmit(&mut self, _t: SmolInstant) -> Option<Self::TxToken<'_>> {
-        Some(AdapterTxToken { queue: &mut self.tx_queue })
+        Some(AdapterTxToken {
+            queue: &mut self.tx_queue,
+        })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -147,7 +163,11 @@ impl Dataplane {
             let _ = addrs.push(IpCidr::new(IpAddress::Ipv4(Ipv4Address(veth_ip)), prefix));
         });
         // TODO(逆向): 路由规则对应 ArraySetMTUAndTunnelRule / split tunnel 域名表
-        Self { iface, sockets: SocketSet::new(Vec::new()), device_tx_out: VecDeque::new() }
+        Self {
+            iface,
+            sockets: SocketSet::new(Vec::new()),
+            device_tx_out: VecDeque::new(),
+        }
     }
 
     pub fn socket_count(&self) -> usize {
@@ -164,8 +184,14 @@ impl Dataplane {
 /// 无 IO 的 device stub，仅供 Interface::new 初始化。
 struct DeviceStub;
 impl Device for DeviceStub {
-    type RxToken<'a> = AdapterRxToken<'a> where Self: 'a;
-    type TxToken<'a> = AdapterTxToken<'a> where Self: 'a;
+    type RxToken<'a>
+        = AdapterRxToken<'a>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = AdapterTxToken<'a>
+    where
+        Self: 'a;
     fn receive(&mut self, _t: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         None
     }
