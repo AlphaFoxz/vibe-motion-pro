@@ -47,7 +47,16 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             conn = server.accept() => {
-                let mut conn = conn?;
+                // accept 失败绝不退出进程（真机曾出现 logout 后静默退出）：
+                // 记日志、退避后继续服务
+                let mut conn = match conn {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("ipc accept failed: {e}");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
                 if let Err(e) = handle_conn(&mut state, &mut conn).await {
                     tracing::warn!("connection error: {e}");
                 }
