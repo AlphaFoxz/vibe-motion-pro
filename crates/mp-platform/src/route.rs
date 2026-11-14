@@ -34,19 +34,101 @@ pub fn validate_ip(ip: &str) -> Result<String, RouteError> {
         .map_err(|_| RouteError::InvalidIp(ip.to_string()))
 }
 
-/// Windows 路由命令：`route add <cidr> <gateway> metric <n>`。
-pub fn windows_route_add(cidr: &str, gateway: &str, metric: u16) -> Result<Vec<String>, RouteError> {
+/// Windows 路由命令：`route add <addr> mask <mask> <gw> metric <n> if <idx>`。
+/// 注意：
+/// - addr/mask 必须是独立参数——合并成一个带空格的参数会被引号包裹，
+///   route.exe 解析失败但**退出码仍为 0**（真机踩坑：静默无路由）。
+/// - 必须显式 `if <idx>`——wintun IP 注册有竞态，缺省时 Windows 可能把网关
+///   解析到物理网卡上（真机踩坑：路由落在 WLAN 接口，包全被 WLAN 网关拒收）。
+pub fn windows_route_add(
+    cidr: &str,
+    gateway: &str,
+    metric: u16,
+    if_index: Option<u32>,
+) -> Result<Vec<String>, RouteError> {
     let (addr, prefix) = validate_cidr(cidr)?;
     let gw = validate_ip(gateway)?;
     let mask = prefix_to_mask(prefix);
-    Ok(vec![
-        "route".into(),
-        "add".into(),
-        format!("{addr} mask {mask}"),
+    let mut argv = vec![
+        "route".to_string(),
+        "add".to_string(),
+        addr,
+        "mask".to_string(),
+        mask,
         gw,
-        "metric".into(),
+        "metric".to_string(),
         metric.to_string(),
-    ])
+    ];
+    if let Some(idx) = if_index {
+        argv.push("if".to_string());
+        argv.push(idx.to_string());
+    }
+    Ok(argv)
+}
+
+/// 解析适配器接口索引。Win32 GetAdaptersAddresses 直查（零子进程）：
+/// 真机冻结实证（freeze_auto.txt）—— 在 async 线程 spawn `route print` 73 次，
+/// 管道读取 WaitForMultipleObjects 永久挂起。API 调用 <1ms，失败返回 None。
+#[cfg(target_os = "windows")]
+pub fn windows_if_index(interface: &str) -> Option<u32> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST,
+        GAA_FLAG_SKIP_UNICAST, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+
+    const FLAGS: u32 =
+        GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
+    unsafe {
+        let mut size: u32 = 0;
+        // 第一次调用取所需缓冲大小（预期返回 ERROR_BUFFER_OVERFLOW）
+        GetAdaptersAddresses(
+            AF_INET as u32,
+            FLAGS,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        );
+        if size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let rc = GetAdaptersAddresses(
+            AF_INET as u32,
+            FLAGS,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+            &mut size,
+        );
+        if rc != 0 {
+            tracing::warn!("GetAdaptersAddresses failed: {rc}");
+            return None;
+        }
+        let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        while !cur.is_null() {
+            let a = &*cur;
+            if !a.FriendlyName.is_null() {
+                let mut len = 0usize;
+                while *a.FriendlyName.add(len) != 0 {
+                    len += 1;
+                }
+                let name = String::from_utf16_lossy(std::slice::from_raw_parts(
+                    a.FriendlyName,
+                    len,
+                ));
+                if name.eq_ignore_ascii_case(interface) {
+                    return Some(a.Anonymous1.Anonymous.IfIndex);
+                }
+            }
+            cur = a.Next as *const IP_ADAPTER_ADDRESSES_LH;
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn windows_if_index(_interface: &str) -> Option<u32> {
+    None
 }
 
 /// Windows 删除路由。
@@ -91,14 +173,15 @@ pub fn prefix_to_mask(prefix: u8) -> String {
     format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
 }
 
-/// Linux `ip route add <cidr> via <gw> dev <if>`。
+/// Linux `ip route replace <cidr> via <gw> dev <if>`（replace 幂等：前次会话
+/// 残留路由直接被覆盖，无需像 Windows 那样先删后加）。
 pub fn linux_route_add(cidr: &str, gateway: &str, dev: &str) -> Result<Vec<String>, RouteError> {
     let (addr, prefix) = validate_cidr(cidr)?;
     let gw = validate_ip(gateway)?;
     Ok(vec![
         "ip".into(),
         "route".into(),
-        "add".into(),
+        "replace".into(),
         format!("{addr}/{prefix}"),
         "via".into(),
         gw,
@@ -119,6 +202,51 @@ pub fn macos_route_add(cidr: &str, gateway: &str) -> Result<Vec<String>, RouteEr
         format!("{addr}/{prefix}"),
         gw,
     ])
+}
+
+/// Linux 删除路由：`ip route del <cidr> dev <if>`。
+pub fn linux_route_delete(cidr: &str, dev: &str) -> Result<Vec<String>, RouteError> {
+    let (addr, prefix) = validate_cidr(cidr)?;
+    Ok(vec!["ip".into(), "route".into(), "del".into(), format!("{addr}/{prefix}"), "dev".into(), dev.into()])
+}
+
+/// macOS 删除路由：`route -n delete -net <cidr>`。
+pub fn macos_route_delete(cidr: &str) -> Result<Vec<String>, RouteError> {
+    let (addr, prefix) = validate_cidr(cidr)?;
+    Ok(vec!["route".into(), "-n".into(), "delete".into(), "-net".into(), format!("{addr}/{prefix}")])
+}
+
+/// macOS DNS：`networksetup -setdnsservers <svc> <dns...>`（多值）。
+/// 注意 svc 是网络服务名（如 "Wi-Fi"）而非接口名 —— 由 netcfg::MacosBackend
+/// 在运行期解析主服务并快照原值。
+pub fn macos_set_dns(service: &str, servers: &[String]) -> Result<Vec<String>, RouteError> {
+    for s in servers {
+        validate_ip(s)?;
+    }
+    let mut argv = vec!["networksetup".into(), "-setdnsservers".into(), service.into()];
+    argv.extend(servers.iter().cloned());
+    Ok(argv)
+}
+
+/// 生成接管期的 resolv.conf 内容：丢弃旧 nameserver 行与注释，保留
+/// search/options 等其余有效行，追加新 nameserver。
+/// （无 systemd-resolved 环境的直写路径；还原由整文件快照负责）
+pub fn build_resolv_conf(orig: &str, servers: &[String]) -> String {
+    let mut out = String::new();
+    for line in orig.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("nameserver") || t.starts_with('#') {
+            continue;
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    for s in servers {
+        out.push_str("nameserver ");
+        out.push_str(s);
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -144,12 +272,17 @@ mod tests {
 
     #[test]
     fn windows_route_add_format() {
-        let cmd = windows_route_add("10.3.130.0/24", "10.91.16.1", 25).unwrap();
+        let cmd = windows_route_add("10.3.130.0/24", "10.91.16.1", 25, Some(16)).unwrap();
         assert_eq!(
             cmd.join(" "),
+            "route add 10.3.130.0 mask 255.255.255.0 10.91.16.1 metric 25 if 16"
+        );
+        let no_if = windows_route_add("10.3.130.0/24", "10.91.16.1", 25, None).unwrap();
+        assert_eq!(
+            no_if.join(" "),
             "route add 10.3.130.0 mask 255.255.255.0 10.91.16.1 metric 25"
         );
-        assert!(windows_route_add("bad/24", "10.91.16.1", 25).is_err());
+        assert!(windows_route_add("bad/24", "10.91.16.1", 25, None).is_err());
     }
 
     #[test]
@@ -172,8 +305,25 @@ mod tests {
     #[test]
     fn unix_route_formats() {
         let l = linux_route_add("10.3.130.0/24", "10.91.16.1", "tun0").unwrap();
-        assert_eq!(l.join(" "), "ip route add 10.3.130.0/24 via 10.91.16.1 dev tun0");
+        assert_eq!(l.join(" "), "ip route replace 10.3.130.0/24 via 10.91.16.1 dev tun0");
         let m = macos_route_add("10.3.130.0/24", "10.91.16.1").unwrap();
         assert_eq!(m.join(" "), "route -n add -net 10.3.130.0/24 10.91.16.1");
+    }
+
+    #[test]
+    fn resolv_conf_rebuild_replaces_nameservers_keeps_rest() {
+        let orig = "# Generated by NetworkManager\nnameserver 192.168.1.1\nnameserver 192.168.1.2\nsearch corp.example lab.example\noptions timeout:2\n";
+        let out = build_resolv_conf(orig, &["10.91.16.1".into(), "10.91.16.2".into()]);
+        assert_eq!(
+            out,
+            "search corp.example lab.example\noptions timeout:2\nnameserver 10.91.16.1\nnameserver 10.91.16.2\n"
+        );
+    }
+
+    #[test]
+    fn resolv_conf_rebuild_from_empty_or_garbage() {
+        assert_eq!(build_resolv_conf("", &["10.91.16.1".into()]), "nameserver 10.91.16.1\n");
+        // 无 nameserver 的异常原文件：仅追加新 DNS，不 panic
+        assert!(build_resolv_conf("\n\n# only comments\n", &["10.91.16.1".into()]).contains("nameserver 10.91.16.1"));
     }
 }

@@ -13,6 +13,7 @@ pub mod protocol;
 pub mod reconnect;
 pub mod session;
 pub mod state;
+pub mod tunnel;
 
 pub use engine::Engine;
 pub use error::Error;

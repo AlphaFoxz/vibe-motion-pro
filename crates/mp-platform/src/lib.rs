@@ -13,25 +13,10 @@ pub enum PlatformError {
     Dns(String),
 }
 
-/// 虚拟网卡句柄（对齐原版 vl3vpn.dll 能力）。
+pub mod adapter;
+pub mod link;
+pub mod netcfg;
 pub mod route;
 
-pub struct VpnAdapter {
-    pub name: String,
-    pub mtu: u16,
-}
-
-impl VpnAdapter {
-    pub fn open(_name: &str, _mtu: u16) -> Result<Self, PlatformError> {
-        // TODO: 按平台 cfg 实现
-        Err(PlatformError::Adapter("not implemented".into()))
-    }
-
-    pub fn add_route(&self, _cidr: &str) -> Result<(), PlatformError> {
-        Err(PlatformError::Route("not implemented".into()))
-    }
-
-    pub fn set_dns(&self, _servers: &[String]) -> Result<(), PlatformError> {
-        Err(PlatformError::Dns("not implemented".into()))
-    }
-}
+// netcfg 的平台命令序列测试见 netcfg::tests（后端注入，任意宿主可跑
+// 任意平台的 DryRun 演练）。

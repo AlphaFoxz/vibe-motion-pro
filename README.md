@@ -20,9 +20,9 @@ crates/
   mp-daemon    特权守护进程（对应原版 vpnd/VPNService）
   mp-platform  各平台虚拟网卡/路由/DNS 封装
   mp-ipc       UI <-> daemon 本地 IPC（ndjson over loopback）
-app/           Tauri 2 前端
+app/           Tauri 2 前端（src-tauri 并入 cargo workspace，全仓单一 Cargo.lock）
 docs/          逆向线索 / 运行时取证 / 功能基线 / 阶段计划（含原版样本校验和）
-scripts/       抓包解析、图标生成等辅助脚本
+scripts/       抓包解析、图标生成、Linux/musl 测试与 WSL 冒烟等辅助脚本
 ```
 
 > 原版 v1.2.26 逆向参考样本（二进制/安装包，约 95MB）**不入库**，存于内部存储；
@@ -42,8 +42,10 @@ scripts/       抓包解析、图标生成等辅助脚本
 ## 构建
 
 ```bash
-cargo test --workspace        # Rust 侧（Windows 需 MSVC）
+cargo test                    # crates/*（default-members；Windows 需 MSVC）
 cd app && pnpm install --registry=https://registry.npmjs.org
+pnpm build                    # 先出 dist（mp-app 编译期嵌入）
+cargo check -p mp-app         # Tauri 壳编译检查
 pnpm tauri dev                # UI 开发
 ```
 

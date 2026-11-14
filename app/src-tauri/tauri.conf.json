@@ -5,7 +5,7 @@
   "identifier": "com.company.motionpro",
   "build": {
     "beforeDevCommand": "pnpm dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
   },
@@ -13,9 +13,12 @@
     "windows": [
       {
         "title": "MotionPro",
-        "width": 520,
-        "height": 560,
-        "resizable": true
+        "width": 400,
+        "height": 580,
+        "resizable": false,
+        "center": true,
+        "minimizable": true,
+        "maximizable": false
       }
     ],
     "security": {
@@ -24,7 +27,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/icon.ico"]
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }

@@ -9,10 +9,20 @@ name = "mp-daemon"
 path = "src/main.rs"
 
 [dependencies]
-mp-core = { path = "../mp-core" }
-mp-platform = { path = "../mp-platform" }
-mp-ipc = { path = "../mp-ipc" }
+mp-core = { workspace = true }
+mp-platform = { workspace = true }
+mp-ipc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = "1"
+serde_json.workspace = true
+local-ip-address = "0.6.13"
+mac_address = "1.2.1"
+dirs = { workspace = true }
+hostname = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+rcgen = "0.13"
+tokio-rustls.workspace = true

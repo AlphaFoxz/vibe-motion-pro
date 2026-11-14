@@ -34,9 +34,33 @@
 
 ## 待补抓包
 
-1. **登录 POST**（账号+密码+验证码提交的端点与字段）—— 重新登录时录 HAR
-2. **ws/command 帧内容** —— DevTools → Network → WS → Messages 面板截图/导出（HAR 默认不含 WS 帧）
-3. welcome.js / l3vpn.js 响应体（HAR 未含，需 Disable cache 后重载页面再导出）
+1. **登录 POST 响应形态**（JSON / 302 / 空 body 未定 —— 免浏览器登录已按"200/302 + ANsession cookie 即成功"宽容实现）
+2. ws/command 帧内容 —— DevTools → Network → WS → Messages 面板截图/导出（HAR 默认不含 WS 帧）
+3. welcome.js / l3vpn.js 响应体（HAR 里 content 为空）
+
+## 免浏览器登录（2026-11-14 补充：an_vpn.js 实证）
+
+从登录后 HAR 提取的 `an_vpn.js`（服务器注入的连接参数，值已匿名化）：
+
+```js
+var _AN_vsite_name = "<站点名>";   // e.g. baosteel_vpn_token
+var _AN_vsite_ip   = "<内网IP>";   // 隧道网关（10.x）
+var _AN_vsite_port = 443;
+var _AN_username   = "<工号>";
+var _AN_auto = 1;                  // 自动拉起客户端
+```
+
+→ "建立连接"按钮的全部输入就这四个参数 + 会话 cookie。
+**结论：浏览器可完全省略**：
+
+| 浏览器步骤 | 直连替代（mp-core 已实现） |
+|---|---|
+| 显示验证码图片 | `ControlClient::fetch_captcha(uuid)` → JPEG 字节 → Tauri UI 展示 |
+| 提交登录表单 | `ControlClient::login(LoginFormData)` → ANsession cookie |
+| postlogin apps | `postlogin_apps()` → `PostloginApps`（site.session 等） |
+| 连接按钮 → localhost:60012 WS | **跳过**（那是通知原版客户端的通道；我们直接用 site 会话调 `open_tunnel(vsite_ip:443)`） |
+
+唯一保留的人机交互：动态验证码输入（防自动化设计，本就需人工）。
 
 
 ## 登录 POST（用户实测，凭据已匿名化）

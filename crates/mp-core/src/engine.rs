@@ -1,11 +1,9 @@
 //! Engine：组合状态机 + 重连策略 + 保活，响应 IPC 指令。
 //! 真实隧道建立（mp-core::protocol / dataplane）未就绪时以模拟连接验证全流程。
 
-use crate::keepalive::KeepaliveMonitor;
 use crate::reconnect::ReconnectPolicy;
 use crate::session::{Credentials, Session, TunnelType};
 use crate::state::{StateMachine, VpnStatus};
-use std::time::Duration;
 
 #[derive(Default)]
 pub struct Engine {
@@ -126,6 +124,8 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keepalive::KeepaliveMonitor;
+    use std::time::Duration;
 
     fn creds() -> Credentials {
         Credentials {
