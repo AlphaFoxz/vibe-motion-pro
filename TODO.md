@@ -88,6 +88,9 @@
       artifact 供人工检查；全套应用图标（icon.icns / 多尺寸 ico / png，
       `scripts/gen_brand_icons.js` 出 1024 源图 + `tauri icon` 生成）；
       release profile 加 strip/lto/codegen-units=1
+- [x] Linux deb 真机构建与安装验证（2026-11-14，WSL Ubuntu）：`MotionPro_0.1.0_amd64.deb`
+      （4.12MB）构建 → dpkg -i → ldd 无缺库 → WSLg GUI 冒烟（进程存活）→ dpkg -r
+      干净卸载；pnpm 12 构建审批（pnpm-workspace.yaml `allowBuilds`，CI 同步升至 12）
 - [ ] Windows：NSIS 或 MSIX；macOS：notarized pkg/dmg（Network Extension/特权 helper）；Linux：deb/rpm/AppImage
 - [ ] daemon 随应用分发（Tauri sidecar externalBin）+ 各平台服务注册
       （windows-service / launchd / systemd）与卸载清理；wintun.dll 补 arm64 变体
