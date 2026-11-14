@@ -14,4 +14,13 @@ linux = []
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+# Windows：直接使用 wintun crate（tun 0.6.1 的 async 层存在持锁无限期阻塞 +
+# 每次 poll 起线程的缺陷，真机实测导致整个 tokio runtime 冻结 —— 见
+# crates/mp-platform/src/adapter.rs 的 Windows 实现注释）
+[target.'cfg(windows)'.dependencies]
+wintun = "0.3"
+
+# 非 Windows：继续用 tun crate（utun/tun 设备）
+[target.'cfg(not(windows))'.dependencies]
 tun = { workspace = true, features = ["async"] }

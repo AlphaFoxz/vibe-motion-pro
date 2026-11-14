@@ -468,6 +468,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "wintun",
 ]
 
 [[package]]
@@ -488,6 +489,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tun",
+ "wintun",
 ]
 
 [[package]]

@@ -1,20 +1,27 @@
 //! 真实虚拟网卡适配器（对齐原版 vl3vpn.dll 的虚拟网卡能力）。
 //!
-//! 实现策略：
-//! - 底层用 `tun` crate：Windows=wintun.dll、Linux=/dev/net/tun、macOS=utun
+//! 实现策略（按平台分裂，Windows 有重大教训）：
+//! - **Windows：直接使用 `wintun` crate（0.3）**。
+//!   曾经走 `tun` crate 0.6.1 的 async 层，但其 `poll_read` 实现存在致命缺陷：
+//!   1. 每次无数据 poll 都 `thread::spawn` 一个阻塞读线程（线程泄漏）
+//!   2. 该线程**持有 std Mutex 调用 `receive_blocking()`**（持锁无限期等待）
+//!   3. 异步路径 `cached.lock()` 同步抢锁 —— 服务器侧停止下发数据后，
+//!      tokio worker 线程逐个卡死在这把锁上，**整个 runtime 冻结**
+//!      （真机实测：连接 ~5 分钟后全任务消失、CPU 归零、无任何日志）
+//!   现改为 mp-daemon 的专职读写 std 线程直接驱动 Session（阻塞只发生在
+//!   自有线程上），彻底绕开 tun crate 的 async 机制。
+//! - 非 Windows：`tun` crate（/dev/net/tun、utun），行为不变
 //! - `TunAdapter` 提供阻塞式 `read_packet`/`write_packet`，
 //!   供 mp-daemon 用独立线程跑阻塞读写，再经 mpsc 桥接进 mp-core 数据面
 //!     见 mp-core::dataplane::ChannelAdapter）
-//! - wintun.dll 需随应用分发（阶段4 打包项），此处只负责加载调用
+//! - wintun.dll 需随应用分发（build.rs 拷贝到 exe 旁）
 
 use crate::PlatformError;
-use tun::Device;
-use tun::platform::Device as TunDevice;
 
 /// 虚拟网卡打开参数。
 #[derive(Debug, Clone)]
 pub struct TunConfig {
-    /// 接口名（Windows 为 wintun 会话名；Linux 尽量用 tun{n}；macOS 忽略由系统分配 utun{n}）
+    /// 接口名（Windows 为 wintun 适配器名；Linux 尽量用 tun{n}；macOS 忽略由系统分配 utun{n}）
     pub name: String,
     /// 本端 IPv4（隧道内地址，服务器分配）
     pub address: std::net::Ipv4Addr,
@@ -35,101 +42,160 @@ impl Default for TunConfig {
     }
 }
 
-/// 已打开的虚拟网卡句柄（阻塞读写语义）。
-pub struct TunAdapter {
-    dev: TunDevice,
-    pub name: String,
-    pub mtu: u16,
-}
+// ===================== Windows：wintun crate 原生实现 =====================
 
-impl TunAdapter {
-    /// 打开/创建虚拟网卡并启用。需要管理员/root 权限（由特权 daemon 调用）。
-    pub fn open(cfg: &TunConfig) -> Result<Self, PlatformError> {
-        let mut config = tun::Configuration::default();
-        config
-            .name(&cfg.name)
-            .address(cfg.address)
-            .netmask(cfg.netmask)
-            .mtu(cfg.mtu as i32)
-            .up();
-        let dev = tun::create(&config).map_err(|e| PlatformError::Adapter(e.to_string()))?;
-        Ok(Self { dev, name: cfg.name.clone(), mtu: cfg.mtu })
+#[cfg(target_os = "windows")]
+pub mod imp {
+    use super::{PlatformError, TunConfig};
+
+    /// 已打开的虚拟网卡（wintun 原生）。
+    /// `session()` 供 mp-daemon 的专职读写线程直接驱动（Send+Sync）。
+    pub struct TunAdapter {
+        session: std::sync::Arc<wintun::Session>,
+        _adapter: std::sync::Arc<wintun::Adapter>,
+        pub name: String,
+        pub mtu: u16,
     }
 
-    /// 克隆设备句柄（供 pump_in/pump_out 双线程分别持读写端；Windows wintun
-    /// 后端不支持 clone，跨平台双端请用 `into_device` + tokio 异步网桥）。
-    #[cfg(not(target_os = "windows"))]
-    pub fn try_clone(&self) -> Result<Self, PlatformError> {
-        let dev = self.dev.try_clone().map_err(|e| PlatformError::Adapter(e.to_string()))?;
-        Ok(Self { dev, name: self.name.clone(), mtu: self.mtu })
-    }
+    impl TunAdapter {
+        /// 打开/创建虚拟网卡并启用。需要管理员权限（由特权 daemon 调用）。
+        pub fn open(cfg: &TunConfig) -> Result<Self, PlatformError> {
+            // DLL 搜索路径含 exe 目录（build.rs 已拷贝）
+            let wintun = unsafe { wintun::load() }
+                .map_err(|e| PlatformError::Adapter(format!("wintun load: {e}")))?;
+            let adapter = wintun::Adapter::create(&wintun, &cfg.name, "MotionPro", None)
+                .map_err(|e| PlatformError::Adapter(format!("adapter create: {e}")))?;
+            adapter
+                .set_network_addresses_tuple(
+                    std::net::IpAddr::V4(cfg.address),
+                    std::net::IpAddr::V4(cfg.netmask),
+                    None,
+                )
+                .map_err(|e| PlatformError::Adapter(format!("set address: {e}")))?;
+            let session = std::sync::Arc::new(
+                adapter
+                    .start_session(wintun::MAX_RING_CAPACITY)
+                    .map_err(|e| PlatformError::Adapter(format!("start session: {e}")))?,
+            );
+            // 接口 MTU（尽力而为；wintun 环形缓冲不受此限制）
+            let _ = std::process::Command::new("netsh")
+                .args([
+                    "interface", "ipv4", "set", "subinterface",
+                    &cfg.name, format!("mtu={}", cfg.mtu).as_str(), "store=persistent",
+                ])
+                .output();
+            Ok(Self { session, _adapter: adapter, name: cfg.name.clone(), mtu: cfg.mtu })
+        }
 
-    /// 转为异步设备（tun "async" feature：AsyncDevice 实现 tokio AsyncRead/AsyncWrite）。
-    pub fn into_async_device(self) -> Result<tun::r#async::AsyncDevice, PlatformError> {
-        tun::r#async::AsyncDevice::new(self.dev).map_err(|e| PlatformError::Adapter(e.to_string()))
-    }
+        /// wintun 会话句柄（Send+Sync；专职线程阻塞驱动的正确载体）。
+        pub fn session(&self) -> std::sync::Arc<wintun::Session> {
+            self.session.clone()
+        }
 
-    /// 当前接口名（macOS 上可能与请求名不同，系统分配 utun{n}）。
-    pub fn actual_name(&self) -> Result<String, PlatformError> {
-        self.dev.name().map_err(|e| PlatformError::Adapter(e.to_string()))
-    }
+        /// 关闭会话（解除阻塞读线程的等待）。
+        pub fn shutdown_session(&self) {
+            let _ = self.session.shutdown();
+        }
 
-    /// 阻塞读取一个来自内核的 IP 包。
-    pub fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, PlatformError> {
-        use std::io::Read;
-        let q = self
-            .dev
-            .queue(0)
-            .ok_or_else(|| PlatformError::Adapter("no queue 0".into()))?;
-        let n = q.read(buf).map_err(|e| PlatformError::Adapter(e.to_string()))?;
-        Ok(n)
-    }
+        /// 阻塞读取一个来自内核的 IP 包（仅在专职线程上使用）。
+        pub fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, PlatformError> {
+            let pkt = self
+                .session
+                .receive_blocking()
+                .map_err(|e| PlatformError::Adapter(format!("receive: {e}")))?;
+            let bytes = pkt.bytes();
+            let n = bytes.len().min(buf.len());
+            buf[..n].copy_from_slice(&bytes[..n]);
+            Ok(n)
+        }
 
-    /// 阻塞写一个 IP 包到内核。
-    pub fn write_packet(&mut self, packet: &[u8]) -> Result<usize, PlatformError> {
-        use std::io::Write;
-        let q = self
-            .dev
-            .queue(0)
-            .ok_or_else(|| PlatformError::Adapter("no queue 0".into()))?;
-        let n = q.write(packet).map_err(|e| PlatformError::Adapter(e.to_string()))?;
-        Ok(n)
-    }
-}
-
-/// mp-platform 侧适配器 → mp-core::dataplane::Adapter 的桥接线程循环体。
-///
-/// 分别在两个独立线程运行（阻塞 IO 与 async 运行时解耦）：
-/// - `pump_in`：内核 → tx（交给数据面）
-/// - `pump_out`：rx（来自数据面）→ 内核
-pub fn pump_in(mut dev: TunAdapter, tx: std::sync::mpsc::Sender<Vec<u8>>, stop: &std::sync::atomic::AtomicBool) {
-    let mut buf = vec![0u8; 65535];
-    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        match dev.read_packet(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                if tx.send(buf[..n].to_vec()).is_err() {
-                    break; // 数据面已关闭
-                }
-            }
-            Err(_) => break,
+        /// 阻塞写一个 IP 包到内核（wintun send 为非阻塞拷贝进环形缓冲）。
+        pub fn write_packet(&mut self, packet: &[u8]) -> Result<usize, PlatformError> {
+            let mut p = self
+                .session
+                .allocate_send_packet(packet.len() as u16)
+                .map_err(|e| PlatformError::Adapter(format!("allocate send: {e}")))?;
+            let n = p.bytes_mut().len();
+            p.bytes_mut().copy_from_slice(packet);
+            self.session.send_packet(p);
+            Ok(n)
         }
     }
 }
 
-pub fn pump_out(
-    mut dev: TunAdapter,
-    rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    stop: &std::sync::atomic::AtomicBool,
-) {
-    // 非阻塞轮询：recv_timeout 兼顾 stop 检查（避免收不到包时永不退出）
-    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-            Ok(packet) => {
-                let _ = dev.write_packet(&packet);
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+#[cfg(target_os = "windows")]
+pub use imp::TunAdapter;
+
+// ===================== 非 Windows：tun crate（utun / /dev/net/tun） =====================
+
+#[cfg(not(target_os = "windows"))]
+pub mod imp {
+    use super::{PlatformError, TunConfig};
+    use tun::Device;
+    use tun::platform::Device as TunDevice;
+
+    /// 已打开的虚拟网卡句柄（阻塞读写语义）。
+    pub struct TunAdapter {
+        dev: TunDevice,
+        pub name: String,
+        pub mtu: u16,
+    }
+
+    impl TunAdapter {
+        /// 打开/创建虚拟网卡并启用。需要管理员/root 权限（由特权 daemon 调用）。
+        pub fn open(cfg: &TunConfig) -> Result<Self, PlatformError> {
+            let mut config = tun::Configuration::default();
+            config
+                .name(&cfg.name)
+                .address(cfg.address)
+                .netmask(cfg.netmask)
+                .mtu(cfg.mtu as i32)
+                .up();
+            let dev = tun::create(&config).map_err(|e| PlatformError::Adapter(e.to_string()))?;
+            Ok(Self { dev, name: cfg.name.clone(), mtu: cfg.mtu })
+        }
+
+        /// 克隆设备句柄（供 pump_in/pump_out 双线程分别持读写端；Windows wintun
+        /// 后端不支持 clone，跨平台双端请用 `into_device` + tokio 异步网桥）。
+        pub fn try_clone(&self) -> Result<Self, PlatformError> {
+            let dev = self.dev.try_clone().map_err(|e| PlatformError::Adapter(e.to_string()))?;
+            Ok(Self { dev: dev, name: self.name.clone(), mtu: self.mtu })
+        }
+
+        /// 转为异步设备（tun "async" feature：AsyncDevice 实现 tokio AsyncRead/AsyncWrite）。
+        /// Windows 不可用（tun crate async 层缺陷，见文件头注释）。
+        pub fn into_async_device(self) -> Result<tun::r#async::AsyncDevice, PlatformError> {
+            tun::r#async::AsyncDevice::new(self.dev).map_err(|e| PlatformError::Adapter(e.to_string()))
+        }
+
+        /// 当前接口名（macOS 上可能与请求名不同，系统分配 utun{n}）。
+        pub fn actual_name(&self) -> Result<String, PlatformError> {
+            self.dev.name().map_err(|e| PlatformError::Adapter(e.to_string()))
+        }
+
+        /// 阻塞读取一个来自内核的 IP 包。
+        pub fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, PlatformError> {
+            use std::io::Read;
+            let q = self
+                .dev
+                .queue(0)
+                .ok_or_else(|| PlatformError::Adapter("no queue 0".into()))?;
+            let n = q.read(buf).map_err(|e| PlatformError::Adapter(e.to_string()))?;
+            Ok(n)
+        }
+
+        /// 阻塞写一个 IP 包到内核。
+        pub fn write_packet(&mut self, packet: &[u8]) -> Result<usize, PlatformError> {
+            use std::io::Write;
+            let q = self
+                .dev
+                .queue(0)
+                .ok_or_else(|| PlatformError::Adapter("no queue 0".into()))?;
+            let n = q.write(packet).map_err(|e| PlatformError::Adapter(e.to_string()))?;
+            Ok(n)
         }
     }
 }
+
+#[cfg(not(target_os = "windows"))]
+pub use imp::TunAdapter;

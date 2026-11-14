@@ -16,6 +16,10 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    // 冻结自检器：tokio 心跳计数器 15 秒不前进（runtime 级冻结，真机实测
+    // 连接 ~5 分钟后全任务消失、CPU 归零）→ cdb 自动抓全线程栈 + 退出重启。
+    spawn_freeze_watchdog();
+
     let addr = std::env::var("MP_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:62000".into());
     let profiles_path = std::env::var("MP_PROFILES").unwrap_or_else(|_| {
         let cfg = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
@@ -47,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             _ = ticker.tick() => {
+                FREEZE_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Some(snap) = state.tick_broadcast(&mut last) {
                     // 状态已广播给订阅的 handle_conn；这里仅记录
                     tracing::debug!(state = snap.state, "status broadcast");
@@ -54,4 +59,57 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// tokio 心跳计数器（watchdog 检测 runtime 冻结）。
+pub static FREEZE_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 冻结自检线程：独立 std 线程（不依赖 tokio）。15s 无心跳 →
+/// 1) 用 cdb 抓全线程栈到 %TEMP%/opencode/freeze_auto.txt
+/// 2) std::process::exit(3)（外部 supervisor/用户重启）
+fn spawn_freeze_watchdog() {
+    std::thread::Builder::new()
+        .name("freeze-watchdog".into())
+        .spawn(move || {
+            let mut last_tick = FREEZE_TICK.load(std::sync::atomic::Ordering::Relaxed);
+            let mut last_change = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let t = FREEZE_TICK.load(std::sync::atomic::Ordering::Relaxed);
+                if t != last_tick {
+                    last_tick = t;
+                    last_change = std::time::Instant::now();
+                    continue;
+                }
+                if last_change.elapsed() >= std::time::Duration::from_secs(15) {
+                    // 冻结！抓栈（cdb 存在时）后自杀
+                    let dump = std::path::PathBuf::from(std::env::temp_dir())
+                        .join("opencode")
+                        .join("freeze_auto.txt");
+                    let cdb = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe";
+                    if std::path::Path::new(cdb).exists() {
+                        let _ = std::process::Command::new(cdb)
+                            .args([
+                                "-p".to_string(),
+                                std::process::id().to_string(),
+                                "-c".to_string(),
+                                "~* k 30; qd".to_string(),
+                                "-y".to_string(),
+                                format!(
+                                    "srv*C:\\symbols*https://msdl.microsoft.com/download/symbols;D:\\vscode_projects\\motion-pro\\target\\debug"
+                                ),
+                            ])
+                            .output();
+                    }
+                    let _ = std::fs::write(
+                        std::path::PathBuf::from(std::env::temp_dir())
+                            .join("opencode")
+                            .join("freeze_marker.txt"),
+                        format!("frozen at {:?}", std::time::SystemTime::now()),
+                    );
+                    std::process::exit(3);
+                }
+            }
+        })
+        .expect("spawn freeze watchdog");
 }

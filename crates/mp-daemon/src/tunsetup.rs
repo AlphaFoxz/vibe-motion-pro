@@ -1,8 +1,11 @@
 //! TUN 网卡接线（dev-7）：隧道泵通道 ⇄ 内核网卡 + 路由/DNS 接管。
 //!
-//! 架构：tun crate "async" feature（tokio AsyncRead/AsyncWrite）——
-//! 单个异步网桥任务 select 双向转发（Windows wintun 设备不可 clone，
-//! 双线程方案在 Windows 不可行，异步 select 是跨平台正解）。
+//! 架构（Windows 教训后的定型）：
+//! - **Windows：wintun Session + 两个专职 std 线程**（读线程阻塞 receive、
+//!   写线程阻塞收包后 send）。阻塞只发生在自有线程上，绝不触碰 tokio。
+//!   曾经用 tun crate 0.6.1 的 async 层，其 poll_read 持锁阻塞 + 每 poll
+//!   起线程的缺陷让整个 tokio runtime 冻结（真机实测 ~5 分钟必现）。
+//! - 非 Windows：tun crate async 网桥（utun / /dev/net/tun 上无此缺陷报告）。
 //!
 //! 失败降级策略（可用性优先）：
 //! - 无管理员权限 / 无 wintun：**不阻断**隧道（登录与握手照常，仅无本地转发）
@@ -14,12 +17,46 @@ use mp_platform::netcfg::{RouteManager, SystemRunner};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// 一次已接线的网卡会话：网桥任务 + 停止标志 + 路由回滚器。
+/// 一次已接线的网卡会话：读写线程 + 停止标志 + 路由回滚器。
 pub struct TunLink {
     stop: Arc<AtomicBool>,
-    bridge: tokio::task::JoinHandle<()>,
+    bridge: BridgeHandle,
     routes: Option<RouteManager>,
     iface: String,
+}
+
+/// 平台网桥句柄（Windows=两个 std 线程；其他=tokio 任务）。
+pub struct BridgeHandle {
+    #[cfg(target_os = "windows")]
+    reader: Option<std::thread::JoinHandle<()>>,
+    #[cfg(target_os = "windows")]
+    writer: Option<std::thread::JoinHandle<()>>,
+    #[cfg(not(target_os = "windows"))]
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// wintun 会话（teardown 时 shutdown 解除读线程阻塞）
+    #[cfg(target_os = "windows")]
+    session: Option<std::sync::Arc<wintun::Session>>,
+}
+
+impl BridgeHandle {
+    fn stop(&mut self, stop: &AtomicBool) {
+        stop.store(true, Ordering::Relaxed);
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(s) = self.session.take() {
+                let _ = s.shutdown(); // 解除 receive_blocking 阻塞
+            }
+            // 线程随通道关闭自行退出，不 join（writer 可能还阻塞在通道上）
+            self.reader = None;
+            self.writer = None;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Some(t) = self.task.take() {
+                t.abort();
+            }
+        }
+    }
 }
 
 impl TunLink {
@@ -46,39 +83,99 @@ impl TunLink {
 
         let adapter = TunAdapter::open(&cfg).map_err(|e| e.to_string())?;
         let iface = adapter.name.clone();
-        let mut dev = adapter.into_async_device().map_err(|e| e.to_string())?;
 
-        // 异步网桥：select 双向转发
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_bridge = Arc::clone(&stop);
-        let bridge = tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut buf = vec![0u8; 65_535];
-            while !stop_bridge.load(Ordering::Relaxed) {
-                tokio::select! {
-                    r = dev.read(&mut buf) => {
-                        match r {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                if kernel_tx.send(buf[..n].to_vec()).await.is_err() {
+
+        #[cfg(target_os = "windows")]
+        let bridge = {
+            // wintun 原生：专职读写线程（阻塞仅在自有线程；修复 runtime 冻结）
+            let session = adapter.session();
+            let stop_r = Arc::clone(&stop);
+            let reader_session = session.clone();
+            let reader = std::thread::Builder::new()
+                .name("mp-tun-reader".into())
+                .spawn(move || {
+                    loop {
+                        if stop_r.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match reader_session.receive_blocking() {
+                            Ok(pkt) => {
+                                // blocking_send：专职线程的正确姿势
+                                if kernel_tx.blocking_send(pkt.bytes().to_vec()).is_err() {
                                     break; // 隧道侧已关
                                 }
                             }
+                            Err(_) => break, // 会话关闭/停机
                         }
                     }
-                    pkt = kernel_rx.recv() => {
-                        match pkt {
-                            Some(p) => {
-                                if dev.write_all(&p).await.is_err() {
-                                    break;
+                })
+                .map_err(|e| format!("spawn reader: {e}"))?;
+
+            let writer_session = session.clone();
+            let stop_w = Arc::clone(&stop);
+            let writer = std::thread::Builder::new()
+                .name("mp-tun-writer".into())
+                .spawn(move || {
+                    loop {
+                        if stop_w.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match kernel_rx.blocking_recv() {
+                            Some(pkt) => {
+                                if pkt.len() > u16::MAX as usize {
+                                    continue;
+                                }
+                                if let Ok(mut p) =
+                                    writer_session.allocate_send_packet(pkt.len() as u16)
+                                {
+                                    p.bytes_mut().copy_from_slice(&pkt);
+                                    writer_session.send_packet(p);
                                 }
                             }
                             None => break, // 隧道侧已关
                         }
                     }
+                })
+                .map_err(|e| format!("spawn writer: {e}"))?;
+
+            BridgeHandle { reader: Some(reader), writer: Some(writer), session: Some(session) }
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let bridge = {
+            let mut dev = adapter.into_async_device().map_err(|e| e.to_string())?;
+            let stop_bridge = Arc::clone(&stop);
+            let task = tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 65_535];
+                while !stop_bridge.load(Ordering::Relaxed) {
+                    tokio::select! {
+                        r = dev.read(&mut buf) => {
+                            match r {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    if kernel_tx.send(buf[..n].to_vec()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        pkt = kernel_rx.recv() => {
+                            match pkt {
+                                Some(p) => {
+                                    if dev.write_all(&p).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
                 }
-            }
-        });
+            });
+            BridgeHandle { task: Some(task) }
+        };
 
         // 路由/DNS 接管：仅当服务器明确下发了虚拟 IP 才动系统网络（安全默认）
         let mut mgr = RouteManager::new(Arc::new(SystemRunner), &ip.to_string(), &iface);
@@ -107,8 +204,7 @@ impl TunLink {
 
     /// 停止网桥并回滚路由/DNS（幂等）。
     pub fn teardown(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        self.bridge.abort();
+        self.bridge.stop(&self.stop);
         if let Some(m) = &mut self.routes {
             let _ = m.revert();
         }
@@ -138,6 +234,16 @@ mod tests {
         match TunLink::bring_up(tx, rx2, None, None, vec![], &[]).await {
             Ok(mut link) => link.teardown(),
             Err(_) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn teardown_is_idempotent() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (_tx2, rx2) = tokio::sync::mpsc::channel(16);
+        if let Ok(mut link) = TunLink::bring_up(tx, rx2, None, None, vec![], &[]).await {
+            link.teardown();
+            link.teardown(); // 二次调用不 panic
         }
     }
 }
