@@ -127,8 +127,16 @@ pub enum FrameError {
 pub enum StreamItem {
     /// 内层 IP 包（原样写入虚拟网卡）。
     IpPacket(Vec<u8>),
-    /// keepalive（伪 IPv4，协议号 255）。
+    /// keepalive（伪 IPv4，协议号 255，子类型 1）。
     KeepAlive(KeepAlive),
+    /// 其他控制帧（协议号 255）：子类型 2=杀隧道（+16 BE 为死因：
+    /// 1=顶号 2=会话无效 3=会话过期 8=注销 15=WG 重启），
+    /// 4=速度隧道端口下发等（FUN_10062270 实证）。
+    Control {
+        subtype: u16,
+        flag: u16,
+        value: u32,
+    },
 }
 
 /// 递增式「裸 IP 流」切包器：feed 字节流，逐个吐出 IP 包 / keepalive。
@@ -165,10 +173,28 @@ impl PacketStream {
         if version != 4 && version != 6 {
             return Err(FrameError::BadVersion(self.buf[0]));
         }
-        if is_keepalive(&self.buf) {
-            let ka = KeepAlive::decode(&self.buf)?;
-            self.buf.drain(..KEEPALIVE_LEN);
-            return Ok(Some(StreamItem::KeepAlive(ka)));
+        // 控制帧（协议号 255）：按 IP 总长字段切帧（可能是 20/24/...B），
+        // 再按子类型分派（FUN_10062270：1=keepalive 2=杀隧道 4=速度端口）
+        if version == 4 && self.buf.len() >= KEEPALIVE_LEN && self.buf[9] == 0xff {
+            let total = u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize;
+            if total < KEEPALIVE_LEN || total > MAX_PACKET {
+                return Err(FrameError::TooLarge(total, MAX_PACKET));
+            }
+            if self.buf.len() < total {
+                return Ok(None);
+            }
+            let subtype = u16::from_be_bytes([self.buf[12], self.buf[13]]);
+            let flag = u16::from_be_bytes([self.buf[14], self.buf[15]]);
+            let value = u32::from_be_bytes([self.buf[16], self.buf[17], self.buf[18], self.buf[19]]);
+            self.buf.drain(..total);
+            return Ok(Some(match subtype {
+                1 => StreamItem::KeepAlive(KeepAlive {
+                    count: subtype,
+                    timestamp_ms: value,
+                    kind: TunnelKind::Tcp,
+                }),
+                other => StreamItem::Control { subtype: other, flag, value },
+            }));
         }
         let len = packet_len(&self.buf).unwrap_or(0);
         if len == 0 {
@@ -319,7 +345,7 @@ mod tests {
     #[test]
     fn rejects_zero_length() {
         let mut s = PacketStream::new();
-        s.feed(&[0x45, 0, 0, 0]);
+        s.feed(&[0x45, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // proto 6，总长 0
         assert!(matches!(s.next_item(), Err(FrameError::ZeroLength)));
     }
 

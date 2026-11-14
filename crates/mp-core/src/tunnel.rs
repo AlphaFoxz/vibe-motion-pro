@@ -208,6 +208,7 @@ pub fn pump_once(
                 stats.packets_in += 1;
             }
             StreamItem::KeepAlive(_) => ka.mark_seen(),
+            StreamItem::Control { .. } => {} // 同步路径忽略（异步路径有完整处理）
         }
     }
     // 任何下行字节都算"对端活着"（对齐原版 select 循环：有读即清零 miss）
@@ -342,9 +343,34 @@ where
                                 }
                                 StreamItem::KeepAlive(_) => {
                                     ka.mark_seen();
-                                    // 应答式心跳（原版行为：对端发一个回一个；真机抓包
-                                    // 原版 4.4/s ≈ 服务器心跳频率，而非 30s 定时器）
-                                    ka_reply = true;
+                                }
+                                StreamItem::Control { subtype, flag, value } => {
+                                    // 服务器主动控制帧（FUN_10062270）。
+                                    // 子类型 2 = 杀隧道，+16 BE 为死因：
+                                    // 1=顶号 2=会话无效 3=会话过期 8=注销 15=WG 重启
+                                    if subtype == 2 {
+                                        let reason = match value {
+                                            1 => "user login again (顶号)",
+                                            2 => "session invalid",
+                                            3 => "session expired",
+                                            8 => "session logout",
+                                            15 => "wireguard restart",
+                                            other => return Err(PumpError::Io(io::Error::new(
+                                                io::ErrorKind::ConnectionAborted,
+                                                format!("server kill tunnel: unknown reason {other}"),
+                                            ))),
+                                        };
+                                        tracing::warn!("SERVER KILL TUNNEL: {reason} (value={value})");
+                                        return Err(PumpError::Io(io::Error::new(
+                                            io::ErrorKind::ConnectionAborted,
+                                            format!("server killed tunnel: {reason}"),
+                                        )));
+                                    }
+                                    if subtype == 4 {
+                                        tracing::info!("speed tunnel port assigned: {}", value & 0xffff);
+                                    } else {
+                                        tracing::debug!("control frame: subtype={subtype} flag={flag} value={value}");
+                                    }
                                 }
                             }
                         }
