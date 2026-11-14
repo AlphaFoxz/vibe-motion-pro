@@ -1,13 +1,20 @@
-//! 网络（路由/DNS）执行器：把 route.rs 构造的命令真正跑起来，
-//! 并提供 DNS 变更前的快照与回滚（对齐原版 InsideProxy 的 netsh 用法）。
+//! 网络（路由/DNS）执行器与平台后端。
 //!
-//! 可测试性：`CommandRunner` trait 注入 —— 测试用 `DryRunRunner` 只记录命令不执行。
+//! 架构（三层，职责分离）：
+//! - [`crate::route`]：纯命令构造（无副作用，全平台可单测）
+//! - [`NetBackend`]：各平台的「接管/还原策略」（残留清理、追加命令、advisory 命令）
+//! - [`RouteManager`]：流程编排（apply → 记账 → revert 幂等回滚），平台无感知
+//!
+//! 可测试性：`RouteManager::with_backend` 可在**任意宿主机**上演练指定平台的
+//! 命令序列（DryRunRunner 只记录不执行）——按宿主 OS 断言的旧测试在
+//! Linux/macOS 上必然失败（2026-11 Linux 基线实证后重构）。
 
-use crate::PlatformError;
 use crate::route::{
-    linux_route_add, linux_route_delete, macos_route_add, macos_route_delete, windows_route_add,
-    windows_route_delete, windows_reset_dns, windows_set_dns,
+    linux_route_add, linux_route_delete, macos_reset_dns, macos_route_add, macos_route_delete,
+    macos_set_dns, windows_reset_dns, windows_route_add, windows_route_delete, windows_set_dns,
+    RouteError,
 };
+use crate::PlatformError;
 use std::sync::{Arc, Mutex};
 
 /// 命令执行抽象（argv 形式；route.rs 构造出的就是无 shell 的 argv）。
@@ -99,9 +106,163 @@ impl CommandRunner for DryRunRunner {
     }
 }
 
-/// 连接期路由/DNS 管理：apply 后保留快照，disconnect 时整体回滚。
+/// 一条 DNS 接管命令；`advisory = true` 表示尽力而为（失败仅告警，
+/// 不判接管失败——例如 resolvectl default-route 在老 systemd 上不存在）。
+pub struct Apply {
+    pub argv: Vec<String>,
+    pub advisory: bool,
+}
+
+/// 平台网络接管策略（路由/DNS 的「怎么接管、怎么还原」）。
+pub trait NetBackend: Send + Sync {
+    /// 下发一条路由的主命令（gateway = 虚拟网卡本端地址）。
+    fn route_add(&self, cidr: &str, gateway: &str, iface: &str) -> Result<Vec<String>, RouteError>;
+    /// add 前的残留清理命令（None = 平台自身幂等无需清理）。
+    /// 执行失败会被忽略（残留不存在是常态）。
+    fn route_pre(&self, _cidr: &str) -> Option<Vec<String>> {
+        None
+    }
+    /// DNS 接管命令序列（主命令在前；advisory 追加命令在后）。
+    fn dns_apply(&self, iface: &str, servers: &[String]) -> Result<Vec<Apply>, RouteError>;
+    /// DNS 还原命令。
+    fn dns_restore(&self, iface: &str) -> Vec<String>;
+    /// 删除一条路由（回滚用）。
+    fn route_del(&self, cidr: &str, iface: &str) -> Result<Vec<String>, RouteError>;
+}
+
+/// 按宿主 OS 选择后端（测试请用 `with_backend` 显式固定平台）。
+pub fn os_backend() -> Box<dyn NetBackend> {
+    match std::env::consts::OS {
+        "linux" => Box::new(LinuxBackend),
+        "macos" => Box::new(MacosBackend),
+        _ => Box::new(WindowsBackend),
+    }
+}
+
+// ===================== Windows =====================
+
+/// Windows：route.exe + netsh。
+/// 真机教训两条（详见 route.rs 注释）：
+/// - add 前先删同前缀旧路由（前次会话残留可能与物理网卡竞争）
+/// - 显式 `if <idx>` 绑定接口（wintun IP 注册竞态会把路由落到物理网卡）
+pub struct WindowsBackend;
+
+impl NetBackend for WindowsBackend {
+    fn route_add(&self, cidr: &str, gateway: &str, iface: &str) -> Result<Vec<String>, RouteError> {
+        windows_route_add(cidr, gateway, 25, crate::route::windows_if_index(iface))
+    }
+
+    fn route_pre(&self, cidr: &str) -> Option<Vec<String>> {
+        windows_route_delete(cidr).ok()
+    }
+
+    fn dns_apply(&self, iface: &str, servers: &[String]) -> Result<Vec<Apply>, RouteError> {
+        let mut out = vec![Apply {
+            argv: windows_set_dns(iface, &servers[0])?,
+            advisory: false,
+        }];
+        // 追加备用 DNS（index 从 2 起）
+        for (i, extra) in servers.iter().enumerate().skip(1) {
+            out.push(Apply {
+                argv: vec![
+                    "netsh".into(),
+                    "interface".into(),
+                    "ip".into(),
+                    "add".into(),
+                    "dns".into(),
+                    format!("name=\"{iface}\""),
+                    extra.clone(),
+                    format!("index={}", i + 1),
+                ],
+                advisory: false,
+            });
+        }
+        Ok(out)
+    }
+
+    fn dns_restore(&self, iface: &str) -> Vec<String> {
+        windows_reset_dns(iface)
+    }
+
+    fn route_del(&self, cidr: &str, _iface: &str) -> Result<Vec<String>, RouteError> {
+        windows_route_delete(cidr)
+    }
+}
+
+// ===================== Linux =====================
+
+/// Linux：iproute2（`ip route replace` 幂等，无需清理残留）+ systemd-resolved。
+/// `resolvectl default-route true` 为 advisory：让 VPN DNS 承担默认解析
+/// （仅 split 场景需要多路由域时不加）；老 systemd 无此子命令，失败仅告警。
+pub struct LinuxBackend;
+
+impl NetBackend for LinuxBackend {
+    fn route_add(&self, cidr: &str, gateway: &str, iface: &str) -> Result<Vec<String>, RouteError> {
+        linux_route_add(cidr, gateway, iface)
+    }
+
+    fn dns_apply(&self, iface: &str, servers: &[String]) -> Result<Vec<Apply>, RouteError> {
+        let mut argv = vec!["resolvectl".into(), "dns".into(), iface.into()];
+        argv.extend(servers.iter().cloned());
+        Ok(vec![
+            Apply { argv, advisory: false },
+            Apply {
+                argv: vec![
+                    "resolvectl".into(),
+                    "default-route".into(),
+                    iface.into(),
+                    "true".into(),
+                ],
+                advisory: true,
+            },
+        ])
+    }
+
+    fn dns_restore(&self, iface: &str) -> Vec<String> {
+        // revert 一并清除该接口的 dns/domain/default-route 设置
+        vec!["resolvectl".into(), "revert".into(), iface.into()]
+    }
+
+    fn route_del(&self, cidr: &str, iface: &str) -> Result<Vec<String>, RouteError> {
+        linux_route_delete(cidr, iface)
+    }
+}
+
+// ===================== macOS =====================
+
+/// macOS：route + networksetup。
+/// 已知限制：`networksetup -setdnsservers` 的第一个参数是**网络服务名**
+/// （如 "Wi-Fi"），当前以接口名（utunN）传入仅对同名服务有效 ——
+/// 待 macOS 真机阶段做「接口 → 服务名」映射（-listnetworkserviceorder）。
+pub struct MacosBackend;
+
+impl NetBackend for MacosBackend {
+    fn route_add(&self, cidr: &str, gateway: &str, _iface: &str) -> Result<Vec<String>, RouteError> {
+        macos_route_add(cidr, gateway)
+    }
+
+    fn dns_apply(&self, iface: &str, servers: &[String]) -> Result<Vec<Apply>, RouteError> {
+        Ok(vec![Apply {
+            argv: macos_set_dns(iface, servers)?,
+            advisory: false,
+        }])
+    }
+
+    fn dns_restore(&self, iface: &str) -> Vec<String> {
+        macos_reset_dns(iface)
+    }
+
+    fn route_del(&self, cidr: &str, _iface: &str) -> Result<Vec<String>, RouteError> {
+        macos_route_delete(cidr)
+    }
+}
+
+// ===================== 编排 =====================
+
+/// 连接期路由/DNS 管理：apply 后保留记账，disconnect 时整体回滚。
 pub struct RouteManager {
     runner: Arc<dyn CommandRunner>,
+    backend: Box<dyn NetBackend>,
     /// 已下发的路由（用于回滚）
     applied_routes: Vec<String>,
     /// DNS 快照：Some(还原命令) 表示做过 DNS 变更
@@ -112,9 +273,21 @@ pub struct RouteManager {
 }
 
 impl RouteManager {
+    /// 按宿主 OS 选择后端（生产路径）。
     pub fn new(runner: Arc<dyn CommandRunner>, gateway: &str, interface: &str) -> Self {
+        Self::with_backend(runner, gateway, interface, os_backend())
+    }
+
+    /// 显式指定后端（测试：在任意宿主机演练任意平台的命令序列）。
+    pub fn with_backend(
+        runner: Arc<dyn CommandRunner>,
+        gateway: &str,
+        interface: &str,
+        backend: Box<dyn NetBackend>,
+    ) -> Self {
         Self {
             runner,
+            backend,
             applied_routes: Vec::new(),
             dns_restore: None,
             gateway: gateway.to_string(),
@@ -123,65 +296,40 @@ impl RouteManager {
     }
 
     /// 添加一条到内网网段的路由（指向虚拟网卡）。成功后记录以便回滚。
-    /// Windows 下先删同前缀旧路由（前次会话残留会与本次竞争，且可能仍绑在
-    /// 物理网卡接口上 —— 真机实测 ping 时通时不通）。
     pub fn add_route(&mut self, cidr: &str) -> Result<(), PlatformError> {
-        let argv = match std::env::consts::OS {
-            "windows" => {
-                if let Ok(del) = windows_route_delete(cidr) {
-                    let _ = self.runner.run(&del); // 不存在时忽略失败
-                }
-                // 显式绑定接口索引，避免 wintun IP 注册竞态导致路由落到物理网卡
-                let if_index = crate::route::windows_if_index(&self.interface);
-                windows_route_add(cidr, &self.gateway, 25, if_index)
-                    .map_err(|e| PlatformError::Route(e.to_string()))?
-            },
-            "linux" => linux_route_add(cidr, &self.gateway, &self.interface)
-                .map_err(|e| PlatformError::Route(e.to_string()))?,
-            "macos" => macos_route_add(cidr, &self.gateway)
-                .map_err(|e| PlatformError::Route(e.to_string()))?,
-            _ => return Err(PlatformError::Route("unsupported platform".into())),
-        };
+        if let Some(pre) = self.backend.route_pre(cidr) {
+            let _ = self.runner.run(&pre); // 残留不存在时失败，忽略
+        }
+        let argv = self
+            .backend
+            .route_add(cidr, &self.gateway, &self.interface)
+            .map_err(|e| PlatformError::Route(e.to_string()))?;
         self.runner.run(&argv)?;
         self.applied_routes.push(cidr.to_string());
         Ok(())
     }
 
-    /// 设置虚拟网卡 DNS，并记录还原命令（Windows 还原为 DHCP；macOS 还原为 empty；
-    /// Linux 走 systemd-resolved 还原空 DNS 列表）。
+    /// 设置虚拟网卡 DNS，并记录还原命令（Windows 还原 DHCP；Linux
+    /// resolvectl revert；macOS 置 empty）。
     pub fn set_dns(&mut self, servers: &[String]) -> Result<(), PlatformError> {
         if servers.is_empty() {
             return Err(PlatformError::Dns("no dns servers".into()));
         }
-        let apply = match std::env::consts::OS {
-            "windows" => windows_set_dns(&self.interface, &servers[0])
-                .map_err(|e| PlatformError::Dns(e.to_string()))?,
-            "macos" => {
-                macos_set_dns(&self.interface, servers).map_err(|e| PlatformError::Dns(e.to_string()))?
-            }
-            "linux" => {
-                linux_set_dns(&self.interface, servers).map_err(|e| PlatformError::Dns(e.to_string()))?
-            }
-            _ => return Err(PlatformError::Dns("unsupported platform".into())),
-        };
-        self.runner.run(&apply)?;
-        // Windows 追加备用 DNS
-        if std::env::consts::OS == "windows" {
-            for (i, extra) in servers.iter().enumerate().skip(1) {
-                let argv = vec![
-                    "netsh".into(), "interface".into(), "ip".into(), "add".into(), "dns".into(),
-                    format!("name=\"{}\"", self.interface), extra.clone(), format!("index={}", i + 1),
-                ];
-                self.runner.run(&argv)?;
+        let applies = self
+            .backend
+            .dns_apply(&self.interface, servers)
+            .map_err(|e| PlatformError::Dns(e.to_string()))?;
+        for apply in applies {
+            match self.runner.run(&apply.argv) {
+                Ok(_) => {}
+                // advisory 命令失败不回滚接管（主命令已成功）
+                Err(e) if apply.advisory => {
+                    tracing::warn!("advisory dns command failed (ignored): {e}")
+                }
+                Err(e) => return Err(e),
             }
         }
-        // 还原命令（Windows=DHCP，macOS=empty，Linux=resolvectl revert）
-        self.dns_restore = Some(match std::env::consts::OS {
-            "windows" => windows_reset_dns(&self.interface),
-            "macos" => macos_reset_dns(&self.interface),
-            "linux" => linux_reset_dns(&self.interface),
-            _ => return Err(PlatformError::Dns("unsupported platform".into())),
-        });
+        self.dns_restore = Some(self.backend.dns_restore(&self.interface));
         Ok(())
     }
 
@@ -194,12 +342,12 @@ impl RouteManager {
             }
         }
         for cidr in self.applied_routes.drain(..).rev() {
-            let argv = match std::env::consts::OS {
-                "windows" => windows_route_delete(&cidr).map_err(|e| PlatformError::Route(e.to_string()))?,
-                "linux" => linux_route_delete(&cidr, &self.interface)
-                    .map_err(|e| PlatformError::Route(e.to_string()))?,
-                "macos" => macos_route_delete(&cidr).map_err(|e| PlatformError::Route(e.to_string()))?,
-                _ => continue,
+            let argv = match self.backend.route_del(&cidr, &self.interface) {
+                Ok(a) => a,
+                Err(_) => {
+                    errs.push("route delete failed");
+                    continue;
+                }
             };
             if self.runner.run(&argv).is_err() {
                 errs.push("route delete failed");
@@ -213,30 +361,70 @@ impl RouteManager {
     }
 }
 
-/// macOS DNS：`networksetup -setdnsservers <svc> <dns...>`（多值；还原用 empty）。
-pub fn macos_set_dns(service: &str, servers: &[String]) -> Result<Vec<String>, crate::route::RouteError> {
-    for s in servers {
-        crate::route::validate_ip(s)?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn mgr_with(b: Box<dyn NetBackend>) -> (DryRunRunner, RouteManager) {
+        let dry = DryRunRunner::new();
+        let mgr = RouteManager::with_backend(Arc::new(dry.clone()), "10.111.222.1", "mp-tun", b);
+        (dry, mgr)
     }
-    let mut argv = vec!["networksetup".into(), "-setdnsservers".into(), service.into()];
-    argv.extend(servers.iter().cloned());
-    Ok(argv)
-}
 
-pub fn macos_reset_dns(service: &str) -> Vec<String> {
-    vec!["networksetup".into(), "-setdnsservers".into(), service.into(), "empty".into()]
-}
-
-/// Linux DNS：`resolvectl dns <if> <servers...>`（systemd-resolved）。
-pub fn linux_set_dns(iface: &str, servers: &[String]) -> Result<Vec<String>, crate::route::RouteError> {
-    for s in servers {
-        crate::route::validate_ip(s)?;
+    #[test]
+    fn windows_flow_predelete_add_dns_restore() {
+        let (dry, mut mgr) = mgr_with(Box::new(WindowsBackend));
+        mgr.add_route("10.3.130.0/24").unwrap();
+        mgr.set_dns(&["10.91.16.1".into(), "10.91.16.2".into()]).unwrap();
+        mgr.revert().unwrap();
+        let log = dry.log();
+        // 非 Windows 宿主上 windows_if_index 为 None → route add 无 if 段
+        assert!(log[0].starts_with("route delete 10.3.130.0"));
+        assert!(log[1].starts_with("route add 10.3.130.0 mask 255.255.255.0 10.111.222.1 metric 25"));
+        assert!(log[2].contains("set dns") && log[2].contains("10.91.16.1"));
+        assert!(log[3].contains("add dns") && log[3].contains("10.91.16.2"));
+        assert!(log[4].contains("source=dhcp"));
+        assert!(log[5].starts_with("route delete 10.3.130.0"));
+        assert_eq!(log.len(), 6);
+        // 幂等：无路由/DNS 残留时 revert 不再执行命令
+        mgr.revert().unwrap();
+        assert_eq!(dry.log().len(), 6);
     }
-    let mut argv = vec!["resolvectl".into(), "dns".into(), iface.into()];
-    argv.extend(servers.iter().cloned());
-    Ok(argv)
-}
 
-pub fn linux_reset_dns(iface: &str) -> Vec<String> {
-    vec!["resolvectl".into(), "revert".into(), iface.into()]
+    #[test]
+    fn linux_flow_replace_resolvectl_revert() {
+        let (dry, mut mgr) = mgr_with(Box::new(LinuxBackend));
+        mgr.add_route("10.3.130.0/24").unwrap();
+        mgr.set_dns(&["10.91.16.1".into()]).unwrap();
+        mgr.revert().unwrap();
+        let log = dry.log();
+        assert_eq!(log[0], "ip route replace 10.3.130.0/24 via 10.111.222.1 dev mp-tun");
+        assert_eq!(log[1], "resolvectl dns mp-tun 10.91.16.1");
+        assert_eq!(log[2], "resolvectl default-route mp-tun true");
+        assert_eq!(log[3], "resolvectl revert mp-tun");
+        assert_eq!(log[4], "ip route del 10.3.130.0/24 dev mp-tun");
+        assert_eq!(log.len(), 5);
+    }
+
+    #[test]
+    fn macos_flow_route_networksetup() {
+        let (dry, mut mgr) = mgr_with(Box::new(MacosBackend));
+        mgr.add_route("10.3.130.0/24").unwrap();
+        mgr.set_dns(&["10.91.16.1".into(), "10.91.16.2".into()]).unwrap();
+        mgr.revert().unwrap();
+        let log = dry.log();
+        assert_eq!(log[0], "route -n add -net 10.3.130.0/24 10.111.222.1");
+        assert_eq!(log[1], "networksetup -setdnsservers mp-tun 10.91.16.1 10.91.16.2");
+        assert_eq!(log[2], "networksetup -setdnsservers mp-tun empty");
+        assert_eq!(log[3], "route -n delete -net 10.3.130.0/24");
+        assert_eq!(log.len(), 4);
+    }
+
+    #[test]
+    fn rejects_empty_dns_and_bad_cidr() {
+        let (_, mut mgr) = mgr_with(Box::new(LinuxBackend));
+        assert!(mgr.set_dns(&[]).is_err());
+        assert!(mgr.add_route("bad-cidr").is_err());
+    }
 }

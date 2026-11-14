@@ -173,14 +173,15 @@ pub fn prefix_to_mask(prefix: u8) -> String {
     format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
 }
 
-/// Linux `ip route add <cidr> via <gw> dev <if>`。
+/// Linux `ip route replace <cidr> via <gw> dev <if>`（replace 幂等：前次会话
+/// 残留路由直接被覆盖，无需像 Windows 那样先删后加）。
 pub fn linux_route_add(cidr: &str, gateway: &str, dev: &str) -> Result<Vec<String>, RouteError> {
     let (addr, prefix) = validate_cidr(cidr)?;
     let gw = validate_ip(gateway)?;
     Ok(vec![
         "ip".into(),
         "route".into(),
-        "add".into(),
+        "replace".into(),
         format!("{addr}/{prefix}"),
         "via".into(),
         gw,
@@ -213,6 +214,22 @@ pub fn linux_route_delete(cidr: &str, dev: &str) -> Result<Vec<String>, RouteErr
 pub fn macos_route_delete(cidr: &str) -> Result<Vec<String>, RouteError> {
     let (addr, prefix) = validate_cidr(cidr)?;
     Ok(vec!["route".into(), "-n".into(), "delete".into(), "-net".into(), format!("{addr}/{prefix}")])
+}
+
+/// macOS DNS：`networksetup -setdnsservers <svc> <dns...>`（多值；还原用 empty）。
+/// 注意 svc 是网络服务名（如 "Wi-Fi"）而非接口名 —— 见 netcfg::MacosBackend 注释。
+pub fn macos_set_dns(service: &str, servers: &[String]) -> Result<Vec<String>, RouteError> {
+    for s in servers {
+        validate_ip(s)?;
+    }
+    let mut argv = vec!["networksetup".into(), "-setdnsservers".into(), service.into()];
+    argv.extend(servers.iter().cloned());
+    Ok(argv)
+}
+
+/// macOS DNS 还原为自动（DHCP）。
+pub fn macos_reset_dns(service: &str) -> Vec<String> {
+    vec!["networksetup".into(), "-setdnsservers".into(), service.into(), "empty".into()]
 }
 
 #[cfg(test)]
@@ -271,7 +288,7 @@ mod tests {
     #[test]
     fn unix_route_formats() {
         let l = linux_route_add("10.3.130.0/24", "10.91.16.1", "tun0").unwrap();
-        assert_eq!(l.join(" "), "ip route add 10.3.130.0/24 via 10.91.16.1 dev tun0");
+        assert_eq!(l.join(" "), "ip route replace 10.3.130.0/24 via 10.91.16.1 dev tun0");
         let m = macos_route_add("10.3.130.0/24", "10.91.16.1").unwrap();
         assert_eq!(m.join(" "), "route -n add -net 10.3.130.0/24 10.91.16.1");
     }

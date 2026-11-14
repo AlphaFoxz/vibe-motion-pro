@@ -195,15 +195,7 @@ pub mod imp {
             Ok(Self { dev, name: cfg.name.clone(), mtu: cfg.mtu })
         }
 
-        /// 克隆设备句柄（供 pump_in/pump_out 双线程分别持读写端；Windows wintun
-        /// 后端不支持 clone，跨平台双端请用 `into_device` + tokio 异步网桥）。
-        pub fn try_clone(&self) -> Result<Self, PlatformError> {
-            let dev = self.dev.try_clone().map_err(|e| PlatformError::Adapter(e.to_string()))?;
-            Ok(Self { dev: dev, name: self.name.clone(), mtu: self.mtu })
-        }
-
         /// 转为异步设备（tun "async" feature：AsyncDevice 实现 tokio AsyncRead/AsyncWrite）。
-        /// Windows 不可用（tun crate async 层缺陷，见文件头注释）。
         pub fn into_async_device(self) -> Result<tun::r#async::AsyncDevice, PlatformError> {
             tun::r#async::AsyncDevice::new(self.dev).map_err(|e| PlatformError::Adapter(e.to_string()))
         }
