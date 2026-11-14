@@ -14,9 +14,8 @@
 //! 现改为 mp-daemon 的专职读写 std 线程直接驱动 Session（阻塞只发生在
 //! 自有线程上），彻底绕开 tun crate 的 async 机制。
 //! - 非 Windows：`tun` crate（/dev/net/tun、utun），行为不变
-//! - `TunAdapter` 提供阻塞式 `read_packet`/`write_packet`，
-//!   供 mp-daemon 用独立线程跑阻塞读写，再经 mpsc 桥接进 mp-core 数据面
-//!   （见 mp-core::dataplane::ChannelAdapter）
+//! - 接口形态：Windows 用 `SessionHandle`（专职线程阻塞驱动），非 Windows 用
+//!   `into_async_device`（tokio 网桥）——由 mp_platform::link 按平台组装
 //! - wintun.dll 需随应用分发（build.rs 拷贝到 exe 旁）
 
 use crate::PlatformError;
@@ -103,30 +102,6 @@ pub mod imp {
         pub fn session(&self) -> SessionHandle {
             SessionHandle(self.session.clone())
         }
-
-        /// 阻塞读取一个来自内核的 IP 包（仅在专职线程上使用）。
-        pub fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, PlatformError> {
-            let pkt = self
-                .session
-                .receive_blocking()
-                .map_err(|e| PlatformError::Adapter(format!("receive: {e}")))?;
-            let bytes = pkt.bytes();
-            let n = bytes.len().min(buf.len());
-            buf[..n].copy_from_slice(&bytes[..n]);
-            Ok(n)
-        }
-
-        /// 阻塞写一个 IP 包到内核（wintun send 为非阻塞拷贝进环形缓冲）。
-        pub fn write_packet(&mut self, packet: &[u8]) -> Result<usize, PlatformError> {
-            let mut p = self
-                .session
-                .allocate_send_packet(packet.len() as u16)
-                .map_err(|e| PlatformError::Adapter(format!("allocate send: {e}")))?;
-            let n = p.bytes_mut().len();
-            p.bytes_mut().copy_from_slice(packet);
-            self.session.send_packet(p);
-            Ok(n)
-        }
     }
 
     /// 可跨线程克隆的会话句柄：mp-daemon 的专职读写线程用它阻塞驱动网卡。
@@ -203,28 +178,6 @@ pub mod imp {
         /// 当前接口名（macOS 上可能与请求名不同，系统分配 utun{n}）。
         pub fn actual_name(&self) -> Result<String, PlatformError> {
             self.dev.name().map_err(|e| PlatformError::Adapter(e.to_string()))
-        }
-
-        /// 阻塞读取一个来自内核的 IP 包。
-        pub fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, PlatformError> {
-            use std::io::Read;
-            let q = self
-                .dev
-                .queue(0)
-                .ok_or_else(|| PlatformError::Adapter("no queue 0".into()))?;
-            let n = q.read(buf).map_err(|e| PlatformError::Adapter(e.to_string()))?;
-            Ok(n)
-        }
-
-        /// 阻塞写一个 IP 包到内核。
-        pub fn write_packet(&mut self, packet: &[u8]) -> Result<usize, PlatformError> {
-            use std::io::Write;
-            let q = self
-                .dev
-                .queue(0)
-                .ok_or_else(|| PlatformError::Adapter("no queue 0".into()))?;
-            let n = q.write(packet).map_err(|e| PlatformError::Adapter(e.to_string()))?;
-            Ok(n)
         }
     }
 }
