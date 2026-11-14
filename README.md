@@ -22,7 +22,7 @@ crates/
   mp-ipc       UI <-> daemon 本地 IPC（ndjson over loopback）
 app/           Tauri 2 前端（src-tauri 并入 cargo workspace，全仓单一 Cargo.lock）
 docs/          逆向线索 / 运行时取证 / 功能基线 / 阶段计划（含原版样本校验和）
-scripts/       抓包解析、图标生成等辅助脚本
+scripts/       抓包解析、图标生成、Linux/musl 测试与 WSL 冒烟等辅助脚本
 ```
 
 > 原版 v1.2.26 逆向参考样本（二进制/安装包，约 95MB）**不入库**，存于内部存储；

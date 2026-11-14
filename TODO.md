@@ -53,6 +53,11 @@
 - [x] 虚拟网卡数据面 + 路由/DNS 接管 —— dev-4 已完成：tun crate 真实适配器（win=wintun/linux/mac）、RouteManager（路由下发+DNS 快照回滚，DryRun 可测）、ChannelAdapter 桥接、Dataplane::pump 真实推进栈、daemon TunnelIo 组装（58 测试全绿，见 docs/plan-dev-4.md）；帧格式确认后接 frame 编解码即闭环
 - [x] Ghidra 深度反编译（阶段0 项）—— T1-T6 全部完成（2026-11-14，Ghidra 12.2 headless 自动化流水线，见 docs/ghidra-tasks.md 结论小节）
 - [ ] 与原版客户端对拍验证（Wireshark 报文一致、连接成功率）
+- [x] Linux/Ubuntu 支持落地（2026-11-14 第二批）：WSL Ubuntu(musl 静态) 86 测试全绿 +
+      运行时冒烟（daemon IPC Status 往返）；NetBackend 三平台策略注入（linux:
+      `ip route replace` + `resolvectl dns/default-route`）；daemon 清零平台
+      cfg（TunLink 下沉 mp-platform，hostname / 设备身份三平台化并真正持久化）；
+      无 systemd-resolved 环境的 resolv.conf 直写回退、macOS 服务名映射待后续
 
 ### 阶段3 UI 功能对齐
 
