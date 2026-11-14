@@ -14,6 +14,7 @@ pub enum PlatformError {
 }
 
 pub mod adapter;
+pub mod link;
 pub mod netcfg;
 pub mod route;
 

@@ -20,6 +20,8 @@ serde_json.workspace = true
 local-ip-address = "0.6.13"
 mac_address = "1.2.1"
 dirs = { workspace = true }
+hostname = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.13"

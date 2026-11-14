@@ -21,7 +21,7 @@ pub async fn connect_with_login(
 ) -> Result<
     (
         netloop::TunnelPump,
-        Option<tunsetup::TunLink>,
+        Option<mp_platform::link::TunLink>,
         mp_core::protocol::PostloginApps,
         mp_core::protocol::NetworkConfig,
         Option<(String, String)>,
@@ -137,7 +137,12 @@ pub async fn connect_with_login(
         .join("; ");
     // 设备身份：优先复用原版客户端注册表身份（服务器认识这台机器），否则随机持久化
     let dev = device_identity();
-    let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "DESKTOP".into());
+    // 主机名（三平台；COMPUTERNAME 是 Windows-only 环境变量）
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "DESKTOP".into());
     let params = TunnelOpenParams {
         cookie: &cookie,
         dev_type: 1,
@@ -159,7 +164,7 @@ pub async fn connect_with_login(
         .iter()
         .filter_map(|(ip, m)| mask_to_prefix(m).map(|p| format!("{ip}/{p}")))
         .collect();
-    let tun = match tunsetup::TunLink::bring_up(
+    let tun = match mp_platform::link::TunLink::bring_up(
         kernel_tx,
         kernel_rx,
         netcfg.virtual_ip,
@@ -223,13 +228,52 @@ fn mask_to_prefix(mask: &std::net::Ipv4Addr) -> Option<u8> {
 }
 
 /// 设备身份（对齐原版 vl3vpn：vl3vpn.dll 持久化于 HKCU\Software\MotionPro\L3VPN）。
-/// 优先复用原版客户端留下的身份（服务器侧已绑定该设备），否则生成并持久化随机 ID。
+/// 查找顺序：
+/// 1) Windows 注册表里原版客户端留下的身份（服务器侧已绑定该设备）
+/// 2) 本机持久化文件（跨平台，与 profiles 同目录）
+/// 3) 随机生成并写入文件（旧实现这里是无持久化的固定常量串，所有安装
+///    共用一个 ID —— 已废弃；服务器以该 ID 识别设备，首次运行后固定）
 pub struct DeviceIdentity {
     pub clientid: String,
     pub cpuid: String,
 }
 
-pub fn device_identity() -> DeviceIdentity {
+/// 身份文件路径：MP_IDENTITY 覆盖；默认 dirs 配置目录（三平台）。
+fn identity_path() -> std::path::PathBuf {
+    std::env::var("MP_IDENTITY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::config_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("MotionPro")
+                .join("device-identity")
+        })
+}
+
+fn identity_from_file(path: &std::path::Path) -> Option<DeviceIdentity> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut clientid = None;
+    let mut cpuid = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("clientid=") {
+            clientid = Some(v.trim().to_string()).filter(|s| !s.is_empty());
+        } else if let Some(v) = line.strip_prefix("cpuid=") {
+            cpuid = Some(v.trim().to_string()).filter(|s| !s.is_empty());
+        }
+    }
+    Some(DeviceIdentity { clientid: clientid?, cpuid: cpuid.unwrap_or_default() })
+}
+
+fn identity_store(path: &std::path::Path, id: &DeviceIdentity) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("clientid={}\ncpuid={}\n", id.clientid, id.cpuid));
+}
+
+/// 原版客户端注册表身份复用（仅 Windows；COMPUTERNAME 无关，见 connect 流程）。
+#[cfg(target_os = "windows")]
+fn identity_from_registry() -> Option<DeviceIdentity> {
     let read_reg = |value: &str| -> Option<String> {
         let out = std::process::Command::new("reg")
             .args([
@@ -248,10 +292,51 @@ pub fn device_identity() -> DeviceIdentity {
     // ClientID 形如 "<HWID>|<extra>|hostname=..."，取 | 前缀
     let clientid = read_reg("ClientID")
         .and_then(|v| v.split('|').next().map(|s| s.to_string()))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "motionpro-rs-fallback-deviceid".into());
-    let cpuid = read_reg("cpuid").filter(|s| !s.is_empty()).unwrap_or_default();
-    DeviceIdentity { clientid, cpuid }
+        .filter(|s| !s.is_empty());
+    let cpuid = read_reg("cpuid").filter(|s| !s.is_empty());
+    Some(DeviceIdentity { clientid: clientid?, cpuid: cpuid.unwrap_or_default() })
+}
+
+pub fn device_identity() -> DeviceIdentity {
+    #[cfg(target_os = "windows")]
+    if let Some(id) = identity_from_registry() {
+        tracing::info!("device identity: 复用原版客户端注册表身份");
+        return id;
+    }
+    let path = identity_path();
+    if let Some(id) = identity_from_file(&path) {
+        return id;
+    }
+    let id = DeviceIdentity {
+        clientid: format!("{:032x}", rand::random::<u128>()),
+        cpuid: format!("{:016x}", rand::random::<u64>()),
+    };
+    identity_store(&path, &id);
+    id
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn identity_file_roundtrip() {
+        let path = std::env::temp_dir().join(format!("mp-id-{:016x}", rand::random::<u64>()));
+        let id = DeviceIdentity { clientid: "a".repeat(32), cpuid: "b".repeat(16) };
+        identity_store(&path, &id);
+        let back = identity_from_file(&path).unwrap();
+        assert_eq!(back.clientid, id.clientid);
+        assert_eq!(back.cpuid, id.cpuid);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn identity_file_rejects_empty_clientid() {
+        let path = std::env::temp_dir().join(format!("mp-id-{:016x}", rand::random::<u64>()));
+        std::fs::write(&path, "clientid=\ncpuid=abc").unwrap();
+        assert!(identity_from_file(&path).is_none());
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// 简易 uuid（v4 形态，验证码会话关联用，无密码学要求）。
@@ -275,7 +360,6 @@ fn url_port(loc: &str) -> Option<u16> {
     let port = auth.split(':').nth(1)?;
     port.parse().ok()
 }pub mod netloop;
-pub mod tunsetup;
 use mp_ipc::codec::{recv_request, send_response};
 use mp_ipc::profile::ProfileMsg;
 use mp_ipc::status::StatusSnapshot;
@@ -340,7 +424,7 @@ pub struct DaemonState {
     /// 活动隧道（免浏览器登录连接的真实数据面；Stop 时 shutdown）
     pub active_tunnel: Option<netloop::TunnelPump>,
     /// 活动网卡接线（路由/DNS 随 Drop 回滚）
-    pub active_tun: Option<tunsetup::TunLink>,
+    pub active_tun: Option<mp_platform::link::TunLink>,
     /// 最近一次会话的（AG 主机, Cookie）——teardown 时发 logout 释放服务端会话
     /// （反复重登不注销会在网关堆僵尸隧道，真机实测后续会话被立即拒转）
     pub last_session: Option<(String, String)>,

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
 
 # Windows：直接使用 wintun crate（tun 0.6.1 的 async 层存在持锁无限期阻塞 +
 # 每次 poll 起线程的缺陷，真机实测导致整个 tokio runtime 冻结 —— 见

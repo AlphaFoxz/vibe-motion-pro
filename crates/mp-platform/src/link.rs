@@ -1,4 +1,5 @@
-//! TUN 网卡接线（dev-7）：隧道泵通道 ⇄ 内核网卡 + 路由/DNS 接管。
+//! TUN 网卡接线：隧道泵通道 ⇄ 内核网卡 + 路由/DNS 接管。
+//! （dev-7 起属于 mp-platform：平台编排全在平台 crate，daemon 零 `#[cfg]`）
 //!
 //! 架构（Windows 教训后的定型）：
 //! - **Windows：wintun Session + 两个专职 std 线程**（读线程阻塞 receive、
@@ -12,8 +13,8 @@
 //! - 'U' 网络配置缺失（虚拟 IP 未知）：网卡用缺省地址打开，**不下发路由**（避免错误接管默认路由断网）
 //! - Drop/teardown 时回滚全部路由与 DNS（RouteManager 逆序还原，幂等）
 
-use mp_platform::adapter::TunAdapter;
-use mp_platform::netcfg::{RouteManager, SystemRunner};
+use crate::adapter::TunAdapter;
+use crate::netcfg::{RouteManager, SystemRunner};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -34,9 +35,9 @@ pub struct BridgeHandle {
     #[cfg(not(target_os = "windows"))]
     task: Option<tokio::task::JoinHandle<()>>,
     /// 会话句柄（teardown 时 shutdown 解除读线程阻塞；
-    /// 平台类型由 mp-platform::SessionHandle 封装，daemon 不依赖 wintun crate）
+    /// 平台类型由 adapter::SessionHandle 封装，外部不接触 wintun）
     #[cfg(target_os = "windows")]
-    session: Option<mp_platform::adapter::SessionHandle>,
+    session: Option<crate::adapter::SessionHandle>,
 }
 
 impl BridgeHandle {
@@ -75,7 +76,7 @@ impl TunLink {
     ) -> Result<Self, String> {
         let ip = veth_ip.unwrap_or(std::net::Ipv4Addr::new(10, 111, 222, 2));
         let mask = netmask.unwrap_or(std::net::Ipv4Addr::new(255, 255, 255, 0));
-        let cfg = mp_platform::adapter::TunConfig {
+        let cfg = crate::adapter::TunConfig {
             name: "mp-tun".into(),
             address: ip,
             netmask: mask,
@@ -99,7 +100,12 @@ impl TunLink {
             rx.await
                 .map_err(|_| "adapter open thread panicked".to_string())??
         };
+        // 接口名：非 Windows 用系统实际分配的名字（macOS 上是内核分配的
+        // utunN，请求名 "mp-tun" 不生效 —— 用它下发路由/DNS 会打到不存在的接口）
+        #[cfg(target_os = "windows")]
         let iface = adapter.name.clone();
+        #[cfg(not(target_os = "windows"))]
+        let iface = adapter.actual_name().unwrap_or_else(|_| adapter.name.clone());
 
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -195,8 +201,8 @@ impl TunLink {
         };
 
         // 路由/DNS 接管：仅当服务器明确下发了虚拟 IP 才动系统网络（安全默认）。
-        // 全部子进程操作挪进 spawn_blocking：route/netsh 是同步阻塞调用，
-        // 直接在 async 线程跑会把主循环心跳饿死（freeze_auto.txt 实证，
+        // 全部子进程操作挪进独立线程：route/netsh/resolvectl 是同步阻塞调用，
+        // 直接在 async 线程跑会把主循环心跳饿死（freeze_auto.txt 实证，Windows
         // 73 条路由 × 每条 2 个子进程阻塞 >15s → 冻结看门狗开火）。
         // 等待方式必须是异步的：连接流程需等路由就绪才能通告已连接，
         // 但 std::thread::join 会冻结定时器轮（12:17 冻结第 2 根因）。

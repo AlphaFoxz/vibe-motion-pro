@@ -32,6 +32,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 smoltcp = "0.11"
 dirs = "6"
+hostname = "0.4"
+rand = "0.9"
 tun = { version = "0.6", features = ["async"] }   # utun/tun（非 Windows）；windows 走 wintun 另配
 
 # 内部 crate（统一从 workspace 引用，避免相对路径散落各处、版本漂移；
