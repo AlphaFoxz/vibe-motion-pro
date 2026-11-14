@@ -32,13 +32,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 smoltcp = "0.11"
 dirs = "6"
+tun = { version = "0.6", features = ["async"] }   # utun/tun（非 Windows）；windows 走 wintun 另配
 
-# 内部 crate（统一从 workspace 引用，避免相对路径散落各处、版本漂移）
+# 内部 crate（统一从 workspace 引用，避免相对路径散落各处、版本漂移；
+# mp-daemon 是纯二进制 crate 无下游，不声明在此）
 mp-core = { path = "crates/mp-core" }
-mp-daemon = { path = "crates/mp-daemon" }
 mp-platform = { path = "crates/mp-platform" }
 mp-ipc = { path = "crates/mp-ipc" }
 
-# daemon / platform 特权侧（路由/DNS 管理与 IPC 序列化按平台再选型：
-# Windows 直用 windows-sys；IPC 走 JSON —— 引入新依赖时再在 workspace 声明）
-tun = { version = "0.6", features = ["async"] }   # utun/tun; windows 走 wintun 另配
+# 发布体积优化（tauri 模板标准项；panic 保持 unwind 不动 daemon 语义）
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

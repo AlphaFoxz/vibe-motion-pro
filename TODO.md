@@ -73,8 +73,14 @@
 
 ### 阶段4 安装分发（升级项）
 
+- [x] 三平台打包冒烟 CI（2026-11-14，不签名）：`bundle` 矩阵任务跑
+      `tauri build`（win=nsis / linux=deb+appimage / mac=app+dmg），产物上传
+      artifact 供人工检查；全套应用图标（icon.icns / 多尺寸 ico / png，
+      `scripts/gen_brand_icons.js` 出 1024 源图 + `tauri icon` 生成）；
+      release profile 加 strip/lto/codegen-units=1
 - [ ] Windows：NSIS 或 MSIX；macOS：notarized pkg/dmg（Network Extension/特权 helper）；Linux：deb/rpm/AppImage
-- [ ] 系统服务注册与卸载清理
+- [ ] daemon 随应用分发（Tauri sidecar externalBin）+ 各平台服务注册
+      （windows-service / launchd / systemd）与卸载清理；wintun.dll 补 arm64 变体
 
 ### 阶段5 验证发布
 

@@ -167,6 +167,9 @@ const outputs = [
   ["tray-connected.png", encodePNG(draw(32, "disc", "green"), 32)],
   ["tray-connecting.png", encodePNG(draw(32, "ring", "amber"), 32)],
   ["tray-disconnected.png", encodePNG(draw(32, "disc", "gray"), 32)],
+  // 应用图标源（1024x1024，同款绿盘对勾）—— `pnpm tauri icon` 由此生成
+  // 全平台套件（icon.icns / 多尺寸 icon.ico / 各尺寸 png）
+  ["appicon-1024.png", encodePNG(draw(1024, "disc", "green"), 1024)],
 ];
 for (const [name, buf] of outputs) {
   fs.writeFileSync(path.join(OUT_DIR, name), buf);
