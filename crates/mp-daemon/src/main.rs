@@ -36,7 +36,27 @@ async fn main() -> anyhow::Result<()> {
     //   冻结看门狗误判自杀）；连接内另有独立心跳分支，认证期间（锁被长时间持有）
     //   FREEZE_TICK 仍每秒前进，看门狗不会误杀。
     let state = Arc::new(Mutex::new(DaemonState::new(store)));
-    let server = TcpServer::bind(&addr).await?;
+    let server = {
+        // 绑定失败重试而非立即退出：本机其他服务偶发抢占端口（如开发工具的
+        // live-daemon 抢过 62000），重试窗口内常可恢复；耗尽后带指引退出。
+        let mut attempts = 0u32;
+        loop {
+            match TcpServer::bind(&addr).await {
+                Ok(s) => break s,
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= 10 {
+                        anyhow::bail!(
+                            "IPC bind {addr} 失败（重试 {attempts} 次）：{e}；\
+                             端口被占用时可改用 MP_IPC_ADDR=127.0.0.1:<port>（UI 侧同样设置）"
+                        );
+                    }
+                    tracing::warn!("ipc bind {addr} failed ({e}), retry {attempts}/10 in 1s");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    };
     tracing::info!("mp-daemon listening on {addr}");
 
     let mut last: Option<mp_ipc::status::StatusSnapshot> = None;
@@ -62,11 +82,15 @@ async fn main() -> anyhow::Result<()> {
                 });
             }
             _ = ticker.tick() => {
+                // 心跳先行且绝不等待状态锁：select handler 一旦 await 锁会挂起
+                // 整个主循环任务，心跳就停了 —— 真实网关认证可轻松持锁 >15s，
+                // 看门狗会误杀健康 daemon（2026-11-14 12:01 实证）。锁忙（认证中）
+                // 则本 tick 跳过广播；连接响应本身会携带最新状态。
                 FREEZE_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let mut st = state.lock().await;
-                if let Some(snap) = st.tick_broadcast(&mut last) {
-                    // 状态已广播给订阅的 handle_conn；这里仅记录
-                    tracing::debug!(state = snap.state, "status broadcast");
+                if let Ok(mut st) = state.try_lock() {
+                    if let Some(snap) = st.tick_broadcast(&mut last) {
+                        tracing::debug!(state = snap.state, "status broadcast");
+                    }
                 }
             }
         }

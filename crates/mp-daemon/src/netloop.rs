@@ -113,7 +113,14 @@ impl TunnelPump {
                     stats.packets_in += 1;
                 }
             }
-            pump_async(&mut stream, &mut tun, &mut demux, &mut ka, &mut stats, &stop2).await
+            let res = pump_async(&mut stream, &mut tun, &mut demux, &mut ka, &mut stats, &stop2).await;
+            // 泵的死亡绝不能无声无息（真机事故：泵 WriteStalled/连接断退出后
+            // JoinHandle 结果被吞，无日志无清理，daemon 变僵尸直到看门狗击杀）
+            match &res {
+                Ok(()) => tracing::info!("tunnel pump stopped (clean)"),
+                Err(e) => tracing::error!("tunnel pump DIED: {e:?} — awaiting reap to clean up"),
+            }
+            res
         });
         Self { task, stop }
     }

@@ -81,15 +81,21 @@ impl TunLink {
             mtu: 1400,
         };
 
-        // 网卡创建（wintun 驱动交互 + netsh MTU）也含阻塞调用，挪出 async 线程
+        // 网卡创建（wintun 驱动交互 + netsh MTU）也含阻塞调用，挪出 async 线程。
+        // 注意：async 侧绝不能 std::thread::join —— join 会把当前 tokio worker
+        // 连同驱动它的定时器轮一起冻结（freeze_auto.txt 12:17 实证：join 期间
+        // 所有 tokio 定时器停摆 → 心跳停 → 看门狗误杀）。改用 oneshot 异步等。
         let adapter = {
             let cfg = cfg.clone();
-            let spawned = std::thread::Builder::new()
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new()
                 .name("mp-adapter-open".into())
-                .spawn(move || TunAdapter::open(&cfg).map_err(|e| e.to_string()))
+                .spawn(move || {
+                    let res = TunAdapter::open(&cfg).map_err(|e| e.to_string());
+                    let _ = tx.send(res);
+                })
                 .map_err(|e| format!("spawn adapter open: {e}"))?;
-            spawned
-                .join()
+            rx.await
                 .map_err(|_| "adapter open thread panicked".to_string())??
         };
         let iface = adapter.name.clone();
@@ -111,9 +117,16 @@ impl TunLink {
                         }
                         match reader_session.receive_blocking() {
                             Ok(pkt) => {
-                                // blocking_send：专职线程的正确姿势
-                                if kernel_tx.blocking_send(pkt.bytes().to_vec()).is_err() {
-                                    break; // 隧道侧已关
+                                // try_send + 满即丢：TCP 自己会重传，内核侧专职
+                                // 线程绝不能在满通道上永久阻塞（真机冻结栈实锤：
+                                // blocking_send 卡死 → 泵死无人消费 → 连锁冻结）
+                                match kernel_tx.try_send(pkt.bytes().to_vec()) {
+                                    Ok(()) => {}
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                        // 丢弃：等待 1ms 再读，避免空转
+                                        std::thread::sleep(std::time::Duration::from_millis(1));
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                                 }
                             }
                             Err(_) => break, // 会话关闭/停机
@@ -191,35 +204,39 @@ impl TunLink {
         // 全部子进程操作挪进 spawn_blocking：route/netsh 是同步阻塞调用，
         // 直接在 async 线程跑会把主循环心跳饿死（freeze_auto.txt 实证，
         // 73 条路由 × 每条 2 个子进程阻塞 >15s → 冻结看门狗开火）。
+        // 等待方式必须是异步的：连接流程需等路由就绪才能通告已连接，
+        // 但 std::thread::join 会冻结定时器轮（12:17 冻结第 2 根因）。
         let mgr = {
             let iface = iface.clone();
             let gw = ip.to_string();
             let routes: Vec<String> = routes.to_vec();
             let dns: Vec<String> = dns.iter().map(|d| d.to_string()).collect();
             let enabled = veth_ip.is_some();
-            let spawned = std::thread::Builder::new()
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new()
                 .name("mp-route-setup".into())
                 .spawn(move || {
-                    if !enabled {
-                        return None;
-                    }
-                    let mut mgr = RouteManager::new(Arc::new(SystemRunner), &gw, &iface);
-                    let mut applied = false;
-                    for r in &routes {
-                        match mgr.add_route(r) {
-                            Ok(()) => applied = true,
-                            Err(e) => tracing::warn!("add_route {r} failed: {e}"),
+                    let result = (|| -> Option<RouteManager> {
+                        if !enabled {
+                            return None;
                         }
-                    }
-                    if !dns.is_empty() && mgr.set_dns(&dns).is_ok() {
-                        applied = true;
-                    }
-                    applied.then_some(mgr)
+                        let mut mgr = RouteManager::new(Arc::new(SystemRunner), &gw, &iface);
+                        let mut applied = false;
+                        for r in &routes {
+                            match mgr.add_route(r) {
+                                Ok(()) => applied = true,
+                                Err(e) => tracing::warn!("add_route {r} failed: {e}"),
+                            }
+                        }
+                        if !dns.is_empty() && mgr.set_dns(&dns).is_ok() {
+                            applied = true;
+                        }
+                        applied.then_some(mgr)
+                    })();
+                    let _ = tx.send(result);
                 })
                 .map_err(|e| format!("spawn route setup: {e}"))?;
-            // 等待设置线程完成（连接流程本就必须等路由就绪才能通告已连接）
-            spawned
-                .join()
+            rx.await
                 .map_err(|_| "route setup thread panicked".to_string())?
         };
 

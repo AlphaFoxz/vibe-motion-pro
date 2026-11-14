@@ -557,7 +557,19 @@ pub async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
                     let mut st = state.lock().await;
                     match req {
                         Request::Connect { host, port, username, password, code } => {
-                            handle_connect(&mut st, &host, port, &username, &password, &code).await
+                            // 总超时兜底：认证链路各阶段理应自带超时，但任何一处
+                            // 遗漏都会让状态锁被无限期持有（其余请求全部排队）。
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(120),
+                                handle_connect(&mut st, &host, port, &username, &password, &code),
+                            )
+                            .await
+                            {
+                                Ok(resp) => resp,
+                                Err(_) => Response::Error {
+                                    message: "connect 整体超时（120s）".into(),
+                                },
+                            }
                         }
                         other => handle_request(&mut st, &other),
                     }

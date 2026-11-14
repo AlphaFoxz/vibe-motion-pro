@@ -60,6 +60,10 @@
   饿死主循环 ticker → 冻结看门狗 15s 误杀 daemon（freeze_auto.txt 实证）。改为
   每连接独立 task + Arc<Mutex<DaemonState>> + 连接内独立心跳分支（不取锁，认证期间免疫）。
   顺带 mp-app 支持 MP_IPC_ADDR 覆盖（与 daemon 对齐）
+- [x] 看门狗误杀第二路径（2026-11-14 补）：ticker 分支「先 fetch_add 再 await 锁」——select
+  handler await 锁会挂起整个主循环任务，真实网关认证持锁 >15s 仍被误杀（12:01:33 实证，
+  本地黑洞服务器 25s 锁持复现）。改为 try_lock（锁忙跳过本 tick 广播，心跳无条件先行）；
+  Connect 加 120s 总超时兜底；IPC bind 失败重试 10 次（开发机其他服务抢占端口时不再秒退）
 - [ ] 逐项对齐功能清单：服务器/账号管理、自动登录、web portal 资源、自动更新、客户端安全检查、root CA 安装、i18n
 
 ### 阶段4 安装分发（升级项）
