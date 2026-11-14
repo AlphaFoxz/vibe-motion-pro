@@ -9,9 +9,9 @@ name = "mp-daemon"
 path = "src/main.rs"
 
 [dependencies]
-mp-core = { path = "../mp-core" }
-mp-platform = { path = "../mp-platform" }
-mp-ipc = { path = "../mp-ipc" }
+mp-core = { workspace = true }
+mp-platform = { workspace = true }
+mp-ipc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

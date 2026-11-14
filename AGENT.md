@@ -28,7 +28,7 @@
 
 1. **不要提交敏感信息**：真实服务器地址、账号、证书私钥（`reference/config/server.p12` 已 ignore）。示例一律用 `vpn.example.com` / `203.0.113.x` / `example_user`。
 2. **`reference/`（逆向参考样本）不入库**，存内部存储；不要把大样本文件加进 git，完整性用 `docs/reference-checksums.md5` 校验。
-3. 提交前确认 `cargo test --workspace` 通过（Windows 需 MSVC 环境；构建脚本见 `/tmp/*.cmd` 模式或 vcvars64）。
+3. 提交前确认 `cargo test` 通过（default-members 四个 crate；Windows 需 MSVC 环境）。涉及 UI 壳时另跑 `cargo check -p mp-app`（需先 `pnpm build` 出 dist）。
 
 ## 环境
 

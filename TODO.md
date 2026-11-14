@@ -41,6 +41,11 @@
 - [x] 初始化 Tauri 2 app（UI 骨架 + 托盘占位 + IPC 桥接 commands）
 - [x] CI（.github/workflows/ci.yml，三平台 cargo check/test；Tauri 构建待 SDK 就绪后加入）
 - [x] 版本管理已 init + 首次提交；做好备份策略（后续推远端双备份）
+- [x] 跨平台结构整理（2026-11-14）：app/src-tauri 并入 cargo workspace（单一 Cargo.lock，
+      CI 拆 rust/app 两矩阵任务）；daemon 去掉 wintun 直接依赖（mp-platform `SessionHandle`
+      封装，顺带删除 mp-platform 三个从未引用的 feature）；Profile 路径三平台化
+      （`dirs::config_dir`，替代 Windows-only 的 APPDATA）；看门狗 cdb/符号路径可由
+      MP_CDB / MP_SYMBOLS 覆盖，符号目录默认 exe 旁（去掉硬编码项目绝对路径）
 
 ### 阶段2 协议与隧道实现
 

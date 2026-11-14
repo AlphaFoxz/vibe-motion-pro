@@ -5,8 +5,16 @@ members = [
     "crates/mp-daemon",
     "crates/mp-platform",
     "crates/mp-ipc",
+    "app/src-tauri",
 ]
-exclude = ["app/src-tauri"]
+# 日常 cargo build/test 只碰 crates/*（mp-app 还依赖前端 dist 产物；
+# 其跨平台编译由 CI 的 app 任务单独覆盖）
+default-members = [
+    "crates/mp-core",
+    "crates/mp-daemon",
+    "crates/mp-platform",
+    "crates/mp-ipc",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,6 +32,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 smoltcp = "0.11"
 dirs = "6"
+
+# 内部 crate（统一从 workspace 引用，避免相对路径散落各处、版本漂移）
+mp-core = { path = "crates/mp-core" }
+mp-daemon = { path = "crates/mp-daemon" }
+mp-platform = { path = "crates/mp-platform" }
+mp-ipc = { path = "crates/mp-ipc" }
 
 # daemon / platform 特权侧（路由/DNS 管理与 IPC 序列化按平台再选型：
 # Windows 直用 windows-sys；IPC 走 JSON —— 引入新依赖时再在 workspace 声明）

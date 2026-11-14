@@ -6,6 +6,7 @@ on:
     branches: [master]
 
 jobs:
+  # crates/*（default-members）：mp-app 之外的部分三平台无额外系统依赖
   rust:
     strategy:
       matrix:
@@ -14,8 +15,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check --workspace
-      - run: cargo test --workspace
+      - run: cargo check
+      - run: cargo test
+  # mp-app（Tauri）：linux 需要 webkit 系统库；先出前端 dist 再编译
+  # （tauri::generate_context! 在编译期嵌入 ../dist，缺产物会编译失败）
+  app:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install webkit deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: build frontend dist
+        working-directory: app
+        run: |
+          pnpm install --registry=https://registry.npmjs.org
+          pnpm build
+      - run: cargo check -p mp-app
   frontend:
     runs-on: ubuntu-latest
     defaults:
