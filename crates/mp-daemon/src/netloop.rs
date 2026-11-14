@@ -94,8 +94,9 @@ impl TunnelPump {
         use mp_core::tunnel::{pump_async, KeepaliveState, TunnelStats};
         let mut demux = PacketStream::new();
         demux.feed(&leftover);
-        // TCP 隧道心跳 ~200ms（原版 pktmon 实测 49.6s 内 220 个心跳 ≈ 4.4/s；
-        // 服务器 15s 无心跳判死）。miss 上限 225 次 ≈ 45s 无任何数据才判死。
+        // TCP 隧道心跳固定 200ms 客户端主动轮询（原版 pktmon 实测 C→S 4.4/s；
+        // 真机对照：应答式模式下服务器反而不发心跳、转发即刻死；200ms 固定
+        // 是唯一拿到过 3 分钟完整转发的配置）。45s 无任何对端数据判死。
         let mut ka = KeepaliveState::new(
             std::time::Duration::from_millis(200),
             225,

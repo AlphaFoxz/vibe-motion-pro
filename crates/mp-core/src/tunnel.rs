@@ -128,12 +128,52 @@ pub struct TunnelStats {
 }
 
 /// 当日毫秒时间戳（原版 GetLocalTime 换算：h*3600+m*60+s 的千倍 + ms）。
+/// 必须用**本地时间**（真机踩坑：UTC 比北京时间慢 8 小时，服务器疑似校验
+/// 时间戳新鲜度，偏差会话被降级 → 转发短暂工作后被掐）。
 fn day_ms(now: std::time::SystemTime) -> u32 {
-    let secs = now
+    let unix_secs = now
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    ((secs % 86_400) * 1000) as u32
+    // 本地时区偏移（秒）：Windows 注册表时区换算复杂，用系统命令取一次并缓存。
+    use std::sync::OnceLock;
+    static OFFSET: OnceLock<i64> = OnceLock::new();
+    let offset = *OFFSET.get_or_init(local_utc_offset_secs);
+    (((unix_secs as i64 + offset).rem_euclid(86_400)) * 1000) as u32
+}
+
+/// 取本地与 UTC 的偏移秒数（Windows: PowerShell；Unix: date +%z）。
+fn local_utc_offset_secs() -> i64 {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "[int]([TimeZoneInfo]::Local).GetUtcOffset((Get-Date)).TotalSeconds"])
+            .output()
+        {
+            if let Ok(s) = String::from_utf8_lossy(&out.stdout).trim().parse::<i64>() {
+                return s;
+            }
+        }
+        8 * 3600 // 兜底：中国时区
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(out) = std::process::Command::new("date")
+            .arg("+%z")
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let s = s.trim();
+            // +0800 格式
+            if s.len() == 5 {
+                let sign = if &s[0..1] == "-" { -1 } else { 1 };
+                let h: i64 = s[1..3].parse().unwrap_or(0);
+                let m: i64 = s[3..5].parse().unwrap_or(0);
+                return sign * (h * 3600 + m * 60);
+            }
+        }
+        0
+    }
 }
 
 /// 一轮隧道泵：
@@ -246,6 +286,9 @@ where
     let mut last_log = std::time::Instant::now();
     let mut tun_pkts_logged = 0u32;
     let mut wire_pkts_logged = 0u32;
+    // 应答式心跳状态：收到对端心跳后待回（≥100ms 限频）
+    let mut ka_reply = false;
+    let mut last_ka_send = std::time::Instant::now() - std::time::Duration::from_secs(1);
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -297,7 +340,12 @@ where
                                     tun.write(&pkt);
                                     stats.packets_in += 1;
                                 }
-                                StreamItem::KeepAlive(_) => ka.mark_seen(),
+                                StreamItem::KeepAlive(_) => {
+                                    ka.mark_seen();
+                                    // 应答式心跳（原版行为：对端发一个回一个；真机抓包
+                                    // 原版 4.4/s ≈ 服务器心跳频率，而非 30s 定时器）
+                                    ka_reply = true;
+                                }
                             }
                         }
                         ka.mark_seen();
@@ -342,8 +390,18 @@ where
             stats.packets_out += 1;
             stats.bytes_out += pkt.len() as u64;
         }
-        // 3) keepalive（同样带 5s 看门狗）
-        match ka.tick() {
+        // 3) keepalive（同样带 5s 看门狗）：应答优先（对端发一个回一个，限频 100ms），
+        //    定时器仅作兜底（间隔来自 Q 配置，缺省 30s）
+        let want_send = ka_reply && last_ka_send.elapsed() >= std::time::Duration::from_millis(100);
+        if want_send {
+            ka_reply = false;
+        }
+        let verdict = if want_send {
+            KeepaliveVerdict::SendNow
+        } else {
+            ka.tick()
+        };
+        match verdict {
             KeepaliveVerdict::SendNow => {
                 let frame = ka.send_keepalive(day_ms(std::time::SystemTime::now()));
                 match tokio::time::timeout(TokioDuration::from_secs(5), stream.write_all(&frame.encode())).await {
@@ -357,6 +415,7 @@ where
                         )));
                     }
                 }
+                last_ka_send = std::time::Instant::now();
                 stats.keepalives_sent += 1;
             }
             KeepaliveVerdict::Dead => return Err(PumpError::Dead),

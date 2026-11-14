@@ -564,20 +564,34 @@ impl ControlClient {
             common_payload.len(),
             String::from_utf8_lossy(&common_payload)
         );
-        // Q 载荷 = 56B 二进制公共配置块（get_config.c 0x5cd）：
-        // flags bit 0x100 = l3vpn 启用；+8 = 服务器指定的 keepalive 间隔；
-        // +0x34 = speed tunnel（开启则须回发 clientid 帧）
+        // Q 载荷 = 220B JSON（真机 dump 实证）：
+        // {"thread_number":4,"netpool_flag":1149184,"keepalive_interval":30,
+        //  "allow_speed_tunnel":0,"speed_tunnel_encryption":0,...}
         let dump_dir = std::path::PathBuf::from(std::env::temp_dir()).join("opencode");
         let _ = std::fs::create_dir_all(&dump_dir);
         let _ = std::fs::write(dump_dir.join("q_frame.bin"), &common_payload);
-        if let Some(cc) = crate::protocol::decode_common_config(&common_payload) {
+        let mut allow_speed_tunnel = false;
+        let payload_trimmed: &[u8] = {
+            let end = common_payload
+                .iter()
+                .rposition(|&b| b != 0)
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            &common_payload[..end]
+        };
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload_trimmed) {
+            allow_speed_tunnel = v["allow_speed_tunnel"].as_i64().unwrap_or(0) != 0;
             tracing::info!(
-                "common config: flags={:#x} l3vpn_enabled={} keepalive={} speed_tunnel={} encrypt={}",
+                "common config(Q JSON): netpool_flag={:?} keepalive_interval={:?} allow_speed_tunnel={allow_speed_tunnel}",
+                v["netpool_flag"].as_i64(),
+                v["keepalive_interval"].as_i64()
+            );
+        } else if let Some(cc) = crate::protocol::decode_common_config(&common_payload) {
+            tracing::info!(
+                "common config(56B binary): flags={:#x} l3vpn_enabled={} keepalive={}",
                 cc.flags,
                 cc.flags & 0x100 != 0,
-                cc.keepalive,
-                cc.speed_tunnel,
-                cc.encrypt
+                cc.keepalive
             );
         }
 
@@ -628,6 +642,9 @@ impl ControlClient {
                     };
                     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(trimmed) {
                         netcfg = crate::protocol::NetworkConfig::from_control_json(&v);
+                        if let Some(flag) = v["resource_group_flag"].as_i64() {
+                            tracing::info!("resource_group_flag = {flag} (非 0/异常值 = 账号可能被限流/隔离)");
+                        }
                     } else {
                         // 真机 'U' 载荷是二进制结构（非 JSON）：启发式扫描 vIP/掩码/include 路由
                         netcfg = crate::protocol::NetworkConfig::from_binary(&payload);
@@ -717,9 +734,9 @@ impl ControlClient {
                 dump
             );
         }
-        // speed tunnel 客户端注册（FUN_1007e0f0）：配置后回发 52B clientid 帧。
-        // 未回发时服务端会话可能卡在半初始化（真机实测：转发短暂工作后被掐）。
-        {
+        // speed tunnel 客户端注册（FUN_1007e0f0）：仅在服务器允许时发送
+        // （Q 配置 allow_speed_tunnel=0 时硬发可能干扰服务端状态机）
+        if allow_speed_tunnel {
             let cid_frame = crate::protocol::clientid_frame(params.client_id);
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stream.write_all(&cid_frame).await {
@@ -941,7 +958,7 @@ mod tests {
                     let mut frame = [0u8; 16];
                     tls.read_exact(&mut frame).await.unwrap();
                     assert_eq!(frame[0], b'P');
-                    let cfg_json = br#"{"mtu":1400}"#;
+                    let cfg_json = br#"{"mtu":1400,"allow_speed_tunnel":1}"#;
                     tls.write_all(&crate::protocol::encode_config_frame(
                         crate::protocol::ConfigMsgType::CommonConfig,
                         cfg_json,
@@ -1010,7 +1027,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(cfg, br#"{"mtu":1400}"#.to_vec());
+        assert_eq!(cfg, br#"{"mtu":1400,"allow_speed_tunnel":1}"#.to_vec());
         assert_eq!(
             netcfg.virtual_ip.map(|i| i.to_string()).as_deref(),
             Some("10.8.0.2")

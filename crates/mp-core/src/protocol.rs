@@ -421,6 +421,7 @@ impl NetworkConfig {
     /// 扫描 (IPv4, 连续掩码) 相邻对 —— 第一对 = 虚拟 IP/掩码
     /// （实测 10.91.18.97 + 255.255.248.0），后续私有网段对 = include 路由
     /// （实测 10.66.0.0/16、10.3.130.0/24 等，与原版 Include Zone 取证吻合）。
+    /// 兜底路径：全量 JSON 解析成功时不走这里。
     pub fn from_binary(payload: &[u8]) -> Self {
         let mut out = Self::default();
         // 严格掩码：二进制位必须连续（如 FF FF F8 00），排除巧合递减序列
