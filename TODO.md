@@ -51,7 +51,16 @@
 
 ### 阶段3 UI 功能对齐
 
-- [ ] 逐项对齐功能清单：服务器/账号管理、自动登录、托盘图标三态（connected/disconnected/reconnecting）、web portal 资源、自动更新、客户端安全检查、root CA 安装、i18n
+- [x] UI 重构（2026-11-14，dev-7）：双视图（连接/服务器）+ 状态圆环 + 400×580 固定窗口；
+  Rust 侧与 daemon 单条长连接多路复用（请求/推送同连接，UI 告别 3s 轮询）；
+  托盘三态图标（scripts/gen_brand_icons.js 生成）+ 菜单 + 左键切换 + 关窗到托盘；
+  连接成功通知 + 自动收起（可关）；Profiles → 服务器卡片（默认★/上次连接/两步删除）；
+  记住密码进 OS keychain（keyring crate）；i18n 全量文案 + 语言切换同步托盘菜单
+- [x] daemon IPC 并发修复（2026-11-14，随 dev-7）：handle_conn 内联 await 导致持久 UI 连接
+  饿死主循环 ticker → 冻结看门狗 15s 误杀 daemon（freeze_auto.txt 实证）。改为
+  每连接独立 task + Arc<Mutex<DaemonState>> + 连接内独立心跳分支（不取锁，认证期间免疫）。
+  顺带 mp-app 支持 MP_IPC_ADDR 覆盖（与 daemon 对齐）
+- [ ] 逐项对齐功能清单：服务器/账号管理、自动登录、web portal 资源、自动更新、客户端安全检查、root CA 安装、i18n
 
 ### 阶段4 安装分发（升级项）
 

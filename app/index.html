@@ -8,34 +8,113 @@
   <body>
     <div id="app">
       <header>
-        <h1 id="appTitle">MotionPro</h1>
-        <span id="status-badge" class="badge disconnected">-</span>
+        <div class="brand">
+          <span class="brand-dot" id="brand-dot"></span>
+          <span id="appTitle">MotionPro</span>
+        </div>
         <select id="lang-select" title="Language"></select>
       </header>
 
+      <div id="offline-banner" class="banner warn hidden"></div>
+
       <main>
-        <section id="login-panel">
-          <label><span id="server-label">Server</span> <input id="server" /></label>
-          <label><span id="username-label">Username</span> <input id="username" /></label>
-          <label><span id="password-label">Password</span> <input id="password" type="password" /></label>
-          <label><span id="otp-label">动态密保</span> <input id="otp" inputmode="numeric" maxlength="8" autocomplete="one-time-code" /></label>
-          <button id="btn-connect">Connect</button>
-          <button id="btn-disconnect">Disconnect</button>
+        <!-- 连接视图 -->
+        <section id="view-connect" class="view active">
+          <div class="hero">
+            <div class="ring" id="ring" data-state="disconnected">
+              <div class="ring-inner"><span id="ring-glyph">—</span></div>
+            </div>
+            <div class="hero-state" id="status-text">未连接</div>
+            <div class="hero-sub" id="status-sub"></div>
+          </div>
+
+          <div id="conn-details" class="details hidden">
+            <div class="cell"><span class="k" id="dur-label"></span><span class="v" id="dur">-</span></div>
+            <div class="cell"><span class="k" id="rtt-label"></span><span class="v" id="rtt">-</span></div>
+            <div class="cell"><span class="k" id="clientIp-label"></span><span class="v" id="client-ip">-</span></div>
+            <div class="cell"><span class="k" id="serverIp-label"></span><span class="v" id="server-ip">-</span></div>
+          </div>
+
+          <div id="error-banner" class="banner error hidden">
+            <span id="error-text"></span>
+            <button id="error-close" class="ghost-ico" title="✕">✕</button>
+          </div>
+          <div id="pick-banner" class="banner info hidden"></div>
+
+          <form id="conn-form" autocomplete="off">
+            <div id="fields">
+              <label class="field">
+                <span id="server-label">Server</span>
+                <select id="server"></select>
+              </label>
+              <div id="manual-host" class="hidden">
+                <label class="field"><span id="server-label2">Server</span>
+                  <input id="server-host" placeholder="vpn.example.com" spellcheck="false" />
+                </label>
+                <label class="field"><span id="port-label">Port</span>
+                  <input id="server-port" inputmode="numeric" value="443" />
+                </label>
+              </div>
+              <label class="field">
+                <span id="username-label">Username</span>
+                <input id="username" spellcheck="false" autocapitalize="off" />
+              </label>
+              <label class="field">
+                <span id="password-label">Password</span>
+                <input id="password" type="password" />
+              </label>
+              <label class="check">
+                <input type="checkbox" id="remember-pwd" />
+                <span id="remember-label"></span>
+              </label>
+              <label class="field">
+                <span id="otp-label">动态密保</span>
+                <input id="otp" inputmode="numeric" maxlength="8" autocomplete="one-time-code" class="otp" />
+              </label>
+            </div>
+            <button type="submit" id="btn-main" class="btn primary">Connect</button>
+            <label class="check sub">
+              <input type="checkbox" id="autohide" checked />
+              <span id="autohide-label"></span>
+            </label>
+          </form>
         </section>
 
-        <section id="profiles-panel">
-          <h2 id="profiles-title">Profiles</h2>
-          <ul id="profiles-list"></ul>
-          <input id="profile-name" placeholder="Profile name" />
-          <input id="profile-host" placeholder="vpn.example.com" />
-          <button id="btn-add-profile">Add</button>
-        </section>
+        <!-- 服务器管理视图 -->
+        <section id="view-servers" class="view">
+          <p class="hint" id="servers-hint"></p>
+          <button id="btn-add-server" class="btn ghost block">＋ <span id="add-server-label"></span></button>
 
-        <section id="session-info">
-          <div><span id="session-label">Session</span>：<span id="session-id">-</span></div>
-          <div><span id="server-ip-label">Server IP</span>：<span id="server-ip">-</span></div>
+          <div id="server-editor" class="editor hidden">
+            <div class="editor-title" id="editor-title"></div>
+            <label class="field"><span id="fName-label"></span><input id="f-name" spellcheck="false" /></label>
+            <label class="field"><span id="fHost-label"></span><input id="f-host" placeholder="vpn.example.com" spellcheck="false" /></label>
+            <div class="row2">
+              <label class="field"><span id="fPort-label"></span><input id="f-port" inputmode="numeric" value="443" /></label>
+              <label class="field"><span id="fTunnel-label"></span>
+                <select id="f-tunnel">
+                  <option value="tcp">TCP</option>
+                  <option value="udp">UDP</option>
+                  <option value="dtls">DTLS</option>
+                  <option value="wireguard">WireGuard</option>
+                </select>
+              </label>
+            </div>
+            <label class="check"><input type="checkbox" id="f-auto" /><span id="fAuto-label"></span></label>
+            <div class="row2">
+              <button id="btn-editor-save" class="btn primary"></button>
+              <button id="btn-editor-cancel" class="btn ghost"></button>
+            </div>
+          </div>
+
+          <div id="server-cards"></div>
         </section>
       </main>
+
+      <nav id="tabbar">
+        <button class="tab active" data-tab="connect"><span class="tab-ico">⬡</span><span id="tab-connect-label"></span></button>
+        <button class="tab" data-tab="servers"><span class="tab-ico">▤</span><span id="tab-servers-label"></span></button>
+      </nav>
     </div>
     <script type="module" src="./src/main.ts"></script>
   </body>

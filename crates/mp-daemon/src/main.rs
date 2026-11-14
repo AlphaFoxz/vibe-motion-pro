@@ -4,10 +4,11 @@
 //! - Profile 持久化（MP_PROFILES 路径，默认 <config>/profiles.toml）
 
 use mp_core::profile::ProfileStore;
-use std::path::Path;
-use mp_daemon::{handle_conn, poll_interval_secs, DaemonState};
+use mp_daemon::{handle_conn, poll_interval_secs, DaemonState, FREEZE_TICK};
 use mp_ipc::transport::TcpServer;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
 #[tokio::main]
@@ -19,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     // 启动时同步算好本地时区偏移（严禁在异步路径里 spawn PowerShell）
     mp_core::tunnel::set_local_utc_offset(mp_core::tunnel::local_utc_offset_secs());
 
-    // 冻结自检器：主循环心跳 15 秒不前进 → cdb 抓栈（仅本地符号，20s 超时）+ 退出
+    // 冻结自检器：心跳 15 秒不前进 → cdb 抓栈（仅本地符号，20s 超时）+ 退出
     spawn_freeze_watchdog();
 
     let addr = std::env::var("MP_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:62000".into());
@@ -30,17 +31,13 @@ async fn main() -> anyhow::Result<()> {
     let store = ProfileStore::load(Path::new(&profiles_path))?;
     tracing::info!("loaded {} profiles from {}", store.list().len(), profiles_path);
 
-    let mut state = DaemonState::new(store);
+    // 状态跨任务共享：每条连接一个独立 task——持久 UI 连接不再饿死主循环 tick
+    // （2026-11 真机踩坑：handle_conn 内联 await 时 ticker 分支 15s 不被轮询，
+    //   冻结看门狗误判自杀）；连接内另有独立心跳分支，认证期间（锁被长时间持有）
+    //   FREEZE_TICK 仍每秒前进，看门狗不会误杀。
+    let state = Arc::new(Mutex::new(DaemonState::new(store)));
     let server = TcpServer::bind(&addr).await?;
     tracing::info!("mp-daemon listening on {addr}");
-
-    // 状态轮询广播任务（对齐原版 1s 周期）
-    {
-        let state_ref = &state;
-        // main 里 state 不能同时被连接处理与轮询可变借用；
-        // 广播只读引擎状态，这里用 try_lock 模式：把 tick 放进 select 循环见下。
-        let _ = state_ref;
-    }
 
     let mut last: Option<mp_ipc::status::StatusSnapshot> = None;
     let mut ticker = interval(Duration::from_secs(poll_interval_secs()));
@@ -57,13 +54,17 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                 };
-                if let Err(e) = handle_conn(&mut state, &mut conn).await {
-                    tracing::warn!("connection error: {e}");
-                }
+                let st = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_conn(st, &mut conn).await {
+                        tracing::warn!("connection error: {e}");
+                    }
+                });
             }
             _ = ticker.tick() => {
                 FREEZE_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if let Some(snap) = state.tick_broadcast(&mut last) {
+                let mut st = state.lock().await;
+                if let Some(snap) = st.tick_broadcast(&mut last) {
                     // 状态已广播给订阅的 handle_conn；这里仅记录
                     tracing::debug!(state = snap.state, "status broadcast");
                 }
@@ -72,8 +73,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// tokio 心跳计数器（watchdog 检测 runtime 冻结）。
-pub static FREEZE_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// tokio 心跳计数器（watchdog 检测 runtime 冻结）——定义在 mp_daemon::FREEZE_TICK，
+/// main 循环与各连接任务都会推进。
 
 /// 冻结自检线程：独立 std 线程（不依赖 tokio）。15s 无心跳 →
 /// 1) 用 cdb 抓全线程栈到 %TEMP%/opencode/freeze_auto.txt

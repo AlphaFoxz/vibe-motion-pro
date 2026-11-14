@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认能力：事件监听/发射等核心权限（自定义 command 不需要额外权限）",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

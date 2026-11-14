@@ -280,8 +280,14 @@ use mp_ipc::codec::{recv_request, send_response};
 use mp_ipc::profile::ProfileMsg;
 use mp_ipc::status::StatusSnapshot;
 use mp_ipc::{Request, Response};
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
+
+/// 主循环/连接处理心跳计数（供 main.rs 的冻结看门狗读取）。
+/// 每秒 +1；15s 不动 → 运行时冻结，看门狗抓栈后自杀。
+pub static FREEZE_TICK: AtomicU64 = AtomicU64::new(0);
 
 fn status_snapshot(e: &Engine) -> StatusSnapshot {
     let mut snap = StatusSnapshot::disconnected();
@@ -519,29 +525,42 @@ async fn handle_connect(
     }
 }
 
-/// 在一条连接上循环处理请求直到对端关闭；
+/// 处理一条连接直到对端关闭；由调用方 spawn 为独立任务，
+/// 主循环因此能继续 accept 与 1s tick（心跳）——否则持久 UI 连接会
+/// 让 ticker 分支饿死、冻结看门狗误判自杀（2026-11 真机踩坑）。
 /// 同时 select 广播通道，向客户端推送 StatusUpdate（对齐原版 cmd 1 推送）。
+///
+/// `state` 为跨任务共享；心跳分支不取锁，长连接认证期间（锁被长时间持有）
+/// FREEZE_TICK 仍每秒前进，看门狗不会误杀。
 pub async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
-    state: &mut DaemonState,
-    stream: &mut S,
+    state: Arc<Mutex<DaemonState>>,
+    stream: S,
 ) -> anyhow::Result<()> {
     use mp_ipc::IpcError;
-    let mut rx = state.status_tx.subscribe();
+    let mut rx = state.lock().await.status_tx.subscribe();
     // 持久 BufReader：跨 select 迭代保留缓冲字节，避免丢包卡死
     let mut stream = tokio::io::BufReader::new(stream);
+    // 连接内独立心跳：仅推进 FREEZE_TICK，不碰状态锁
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                FREEZE_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             req = recv_request(&mut stream) => {
                 let req = match req {
                     Ok(r) => r,
                     Err(IpcError::Closed) => return Ok(()),
                     Err(e) => return Err(e.into()),
                 };
-                let resp = match req {
-                    Request::Connect { host, port, username, password, code } => {
-                        handle_connect(state, &host, port, &username, &password, &code).await
+                let resp = {
+                    let mut st = state.lock().await;
+                    match req {
+                        Request::Connect { host, port, username, password, code } => {
+                            handle_connect(&mut st, &host, port, &username, &password, &code).await
+                        }
+                        other => handle_request(&mut st, &other),
                     }
-                    other => handle_request(state, &other),
                 };
                 send_response(&resp, &mut stream).await?;
             }
@@ -573,13 +592,11 @@ mod tests {
 
     #[tokio::test]
     async fn full_request_cycle_over_duplex() {
-        let (client, mut server) = tokio::io::duplex(4096);
+        let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
-        let mut st = state();
+        let st = Arc::new(Mutex::new(state()));
 
-        let srv = tokio::spawn(async move {
-            handle_conn(&mut st, &mut server).await.unwrap();
-        });
+        let srv = tokio::spawn(handle_conn(st, server));
 
         // 普通请求往返
         send_request(&Request::Status, &mut client).await.unwrap();
@@ -607,7 +624,7 @@ mod tests {
         }
 
         drop(client);
-        srv.await.unwrap();
+        srv.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -669,12 +686,10 @@ mod tests {
 
     #[tokio::test]
     async fn profile_crud_over_ipc() {
-        let (client, mut server) = tokio::io::duplex(4096);
+        let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
-        let mut st = state();
-        let srv = tokio::spawn(async move {
-            handle_conn(&mut st, &mut server).await.unwrap();
-        });
+        let st = Arc::new(Mutex::new(state()));
+        let srv = tokio::spawn(handle_conn(st, server));
 
         send_request(
             &Request::AddProfile {
@@ -726,7 +741,7 @@ mod tests {
         assert!(matches!(res, Response::Status { .. }));
 
         drop(client);
-        srv.await.unwrap();
+        srv.await.unwrap().unwrap();
     }
 
     /// 全链路 mock 网关：login / postlogin / vpntunnel / 数据回显 一体。
@@ -863,12 +878,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connect_login_full_flow_over_ipc() {
         let port = spawn_mock_gateway().await;
-        let (client, mut server) = tokio::io::duplex(4096);
+        let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
-        let mut st = state();
-        let srv = tokio::spawn(async move {
-            handle_conn(&mut st, &mut server).await.unwrap();
-        });
+        let st = Arc::new(Mutex::new(state()));
+        let srv = tokio::spawn(handle_conn(st, server));
 
         // 免浏览器登录连接（用户名/密码/动态密保）
         send_request(
@@ -906,18 +919,16 @@ mod tests {
         }
 
         drop(client);
-        srv.await.unwrap();
+        srv.await.unwrap().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connect_auth_failure_returns_error() {
         let port = spawn_mock_tls_reject_login().await;
-        let (client, mut server) = tokio::io::duplex(4096);
+        let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
-        let mut st = state();
-        let srv = tokio::spawn(async move {
-            handle_conn(&mut st, &mut server).await.unwrap();
-        });
+        let st = Arc::new(Mutex::new(state()));
+        let srv = tokio::spawn(handle_conn(st, server));
         send_request(
             &Request::Connect {
                 host: "127.0.0.1".into(),
@@ -935,7 +946,7 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
         drop(client);
-        srv.await.unwrap();
+        srv.await.unwrap().unwrap();
     }
 
     /// 登录被拒的 mock：200 但不种 ANsession。

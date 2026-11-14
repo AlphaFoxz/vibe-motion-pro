@@ -13,9 +13,12 @@
     "windows": [
       {
         "title": "MotionPro",
-        "width": 520,
-        "height": 560,
-        "resizable": true
+        "width": 400,
+        "height": 580,
+        "resizable": false,
+        "center": true,
+        "minimizable": true,
+        "maximizable": false
       }
     ],
     "security": {
