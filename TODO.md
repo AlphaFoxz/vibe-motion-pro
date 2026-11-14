@@ -20,11 +20,11 @@
 ### 阶段0 协议逆向重建
 
 - [x] 初步线索提取：导出表 + 字符串分析已完成，见 `docs/protocol-clues.md`（发现 PDB 路径、57 个 API、/vpntunnel 端点、TCP/UDP/DTLS/WG 四种隧道）
-- [ ] 用 Ghidra/IDA 深度反编译 ArrayVPNApi.dll / vpnd.exe / InsideProxy.exe，重建协议文档（握手、认证、隧道封装、心跳/重连）
-- [ ] 用 Wireshark 抓包与反编译结果互相印证
+- [x] Ghidra 深度反编译（2026-11-14 批次）：vpnd.exe 全量、vl3vpn.dll 多轮锚点、**vpnhwidtool_x64.exe 全量（HWID 生成链）**、**ArrayWGClient.exe（WG TCP 混淆/TLS 伪装，T7）** —— 见 docs/ghidra-tasks.md T1-T7 与 docs/decomp/ 新增 5 个产物；仍缺：InsideProxy.exe、ArrayVPNApi.dll 全量
+- [ ] 用 Wireshark 抓包与反编译结果互相印证（重点：UDP 握手报文与 "200 OK"、服务端 UDP 端口下发键、201 JSON 配置键名、launch/disconnect 命令流）
 - [x] 整理功能清单：已基于 OEM.ini 全部开关项 + ini 用户配置 + 安装包资源生成 `docs/feature-list.md`（8 大类，含裁剪建议）
-- [ ] Ghidra 反编译 vpnd.exe：`/vpntunnel` 请求/响应格式、认证字段、cookie 处理
-- [ ] Ghidra 反编译 vl3vpn.dll：隧道包封装格式、keepalive 报文、MTU/TAF 结构
+- [x] Ghidra 反编译 vpnd.exe：`/vpntunnel` 请求/响应格式、认证字段、cookie 处理（T2/T5）
+- [x] Ghidra 反编译 vl3vpn.dll：隧道包封装格式、keepalive 报文、MTU/TAF 结构（T1/T3/T4/T6/T7）
 - [x] pktmon 抓包：TCP 隧道心跳实测（~200ms）；UDP/WG 模式未覆盖（原版当前未启用）
 
 ### 技术选型：Rust 核心 + Tauri 2 UI

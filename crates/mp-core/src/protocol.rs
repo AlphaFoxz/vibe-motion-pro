@@ -304,6 +304,46 @@ pub fn decode_config_frame(buf: &[u8]) -> Option<Result<(ConfigMsgType, Vec<u8>,
     Some(Ok((kind, buf[CONFIG_FRAME_HEADER_LEN..total].to_vec(), total)))
 }
 
+/// 编码 52B clientid 控制帧（伪 IPv4，协议号 255，子类型 4 @+12 BE；
+/// Ghidra T-补：FUN_1007e0f0 udp_tunnel.c —— speed tunnel 开启时经主 TCP 隧道发出）。
+/// 布局：`45 00 00 34`（BE 总长 52）+ `00 ff 00 00`（TTL0/协议255/校验0）
+/// + +12 BE=4（子类型）+ +14=0（无时间戳）+ +16..51 = 36B clientid 字符串。
+pub fn clientid_frame(clientid: &str) -> Vec<u8> {
+    let mut f = vec![0u8; 52];
+    f[0] = 0x45;
+    f[2..4].copy_from_slice(&52u16.to_be_bytes());
+    f[8] = 0x00;
+    f[9] = 0xff;
+    f[12..14].copy_from_slice(&4u16.to_be_bytes());
+    let id = clientid.as_bytes();
+    let n = id.len().min(36);
+    f[16..16 + n].copy_from_slice(&id[..n]);
+    f
+}
+
+/// 解码 'Q' 载荷（56B 二进制公共配置块，get_config.c 0x5cd 实证）：
+/// `[+4]=netpool flags u32 LE（bit 0x100 = l3vpn 启用）[+8]=keepalive 间隔
+/// [+0x34]=speed tunnel [+0x35]=加密`。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CommonConfig {
+    pub flags: u32,
+    pub keepalive: u32,
+    pub speed_tunnel: u8,
+    pub encrypt: u8,
+}
+
+pub fn decode_common_config(payload: &[u8]) -> Option<CommonConfig> {
+    if payload.len() < 0x36 {
+        return None;
+    }
+    Some(CommonConfig {
+        flags: u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        keepalive: u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]),
+        speed_tunnel: payload[0x34],
+        encrypt: payload[0x35],
+    })
+}
+
 /// 编码 48 字节网络配置请求帧（'T'；Ghidra T3：get_config.c 0x5f4-0x61f）。
 /// 布局：16B 头 {[0]='T' [12]=载荷长 0x20(LE)} + 32B 载荷
 /// {[16]=本机地址数 [20..40]=5×本机 IPv4 [40..46]=网卡 MAC}。

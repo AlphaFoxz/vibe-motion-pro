@@ -135,12 +135,15 @@ pub async fn connect_with_login(
         .cloned()
         .collect::<Vec<_>>()
         .join("; ");
+    // 设备身份：优先复用原版客户端注册表身份（服务器认识这台机器），否则随机持久化
+    let dev = device_identity();
+    let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "DESKTOP".into());
     let params = TunnelOpenParams {
         cookie: &cookie,
         dev_type: 1,
-        client_id: "motionpro-rs",
-        cpu_id: "",
-        hostname: &std::env::var("COMPUTERNAME").unwrap_or_default(),
+        client_id: &dev.clientid,
+        cpu_id: &dev.cpuid,
+        hostname: &hostname,
         ipv6: false,
     };
     let (stream, _cfg, netcfg, leftover) =
@@ -222,6 +225,38 @@ fn mask_to_prefix(mask: &std::net::Ipv4Addr) -> Option<u8> {
     } else {
         None
     }
+}
+
+/// 设备身份（对齐原版 vl3vpn：vl3vpn.dll 持久化于 HKCU\Software\MotionPro\L3VPN）。
+/// 优先复用原版客户端留下的身份（服务器侧已绑定该设备），否则生成并持久化随机 ID。
+pub struct DeviceIdentity {
+    pub clientid: String,
+    pub cpuid: String,
+}
+
+pub fn device_identity() -> DeviceIdentity {
+    let read_reg = |value: &str| -> Option<String> {
+        let out = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\MotionPro\L3VPN",
+                "/v",
+                value,
+            ])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.lines()
+            .find(|l| l.contains("REG_SZ"))
+            .and_then(|l| l.split_whitespace().last().map(|s| s.to_string()))
+    };
+    // ClientID 形如 "<HWID>|<extra>|hostname=..."，取 | 前缀
+    let clientid = read_reg("ClientID")
+        .and_then(|v| v.split('|').next().map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "motionpro-rs-fallback-deviceid".into());
+    let cpuid = read_reg("cpuid").filter(|s| !s.is_empty()).unwrap_or_default();
+    DeviceIdentity { clientid, cpuid }
 }
 
 /// 日志脱敏：把 JSON 里指定字符串键的值打码（"key":"val" → "key":"***"）。

@@ -564,10 +564,22 @@ impl ControlClient {
             common_payload.len(),
             String::from_utf8_lossy(&common_payload)
         );
-        // Q 帧为二进制结构（56B），落盘供离线分析
+        // Q 载荷 = 56B 二进制公共配置块（get_config.c 0x5cd）：
+        // flags bit 0x100 = l3vpn 启用；+8 = 服务器指定的 keepalive 间隔；
+        // +0x34 = speed tunnel（开启则须回发 clientid 帧）
         let dump_dir = std::path::PathBuf::from(std::env::temp_dir()).join("opencode");
         let _ = std::fs::create_dir_all(&dump_dir);
         let _ = std::fs::write(dump_dir.join("q_frame.bin"), &common_payload);
+        if let Some(cc) = crate::protocol::decode_common_config(&common_payload) {
+            tracing::info!(
+                "common config: flags={:#x} l3vpn_enabled={} keepalive={} speed_tunnel={} encrypt={}",
+                cc.flags,
+                cc.flags & 0x100 != 0,
+                cc.keepalive,
+                cc.speed_tunnel,
+                cc.encrypt
+            );
+        }
 
         // 'T' 网络配置请求（本机 IP 列表 + MAC）→ 'U' 响应（虚拟 IP/DNS）
         stream
@@ -704,6 +716,17 @@ impl ControlClient {
                 "waiting 'U': 10s timeout, enter data mode with defaults; U head hex={:02X?}",
                 dump
             );
+        }
+        // speed tunnel 客户端注册（FUN_1007e0f0）：配置后回发 52B clientid 帧。
+        // 未回发时服务端会话可能卡在半初始化（真机实测：转发短暂工作后被掐）。
+        {
+            let cid_frame = crate::protocol::clientid_frame(params.client_id);
+            use tokio::io::AsyncWriteExt;
+            if let Err(e) = stream.write_all(&cid_frame).await {
+                tracing::warn!("clientid frame write failed: {e}");
+            } else {
+                tracing::info!("clientid frame sent ({}B)", cid_frame.len());
+            }
         }
         return Ok((stream, common_payload, netcfg, pending));
     }
@@ -944,6 +967,12 @@ mod tests {
                     pkt[9] = 17;
                     resp.extend_from_slice(&pkt);
                     tls.write_all(&resp).await.unwrap();
+                    // 5.5 读 52B clientid 控制帧（speed tunnel 注册；不回显）
+                    let mut cid = [0u8; 52];
+                    tls.read_exact(&mut cid).await.unwrap();
+                    assert_eq!(cid[0], 0x45);
+                    assert_eq!(cid[9], 0xff);
+                    assert_eq!(u16::from_be_bytes([cid[12], cid[13]]), 4);
                     // 6. 回显后续所有字节（模拟隧道）
                     loop {
                         match tls.read(&mut buf).await {
