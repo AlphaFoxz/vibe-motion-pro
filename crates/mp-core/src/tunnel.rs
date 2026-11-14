@@ -130,20 +130,28 @@ pub struct TunnelStats {
 /// 当日毫秒时间戳（原版 GetLocalTime 换算：h*3600+m*60+s 的千倍 + ms）。
 /// 必须用**本地时间**（真机踩坑：UTC 比北京时间慢 8 小时，服务器疑似校验
 /// 时间戳新鲜度，偏差会话被降级 → 转发短暂工作后被掐）。
+/// 本地与 UTC 偏移秒数（daemon 启动时一次性算好注入；异步路径里惰性拉起
+/// PowerShell 会在首次心跳时阻塞 worker —— 真机冻结事故的头号嫌疑）。
+pub static LOCAL_UTC_OFFSET_SECS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(i64::MIN);
+
+/// daemon 启动时调用（同步、runtime 之前）。
+pub fn set_local_utc_offset(secs: i64) {
+    LOCAL_UTC_OFFSET_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn day_ms(now: std::time::SystemTime) -> u32 {
     let unix_secs = now
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // 本地时区偏移（秒）：Windows 注册表时区换算复杂，用系统命令取一次并缓存。
-    use std::sync::OnceLock;
-    static OFFSET: OnceLock<i64> = OnceLock::new();
-    let offset = *OFFSET.get_or_init(local_utc_offset_secs);
+    let offset = LOCAL_UTC_OFFSET_SECS.load(std::sync::atomic::Ordering::Relaxed);
+    let offset = if offset == i64::MIN { 8 * 3600 } else { offset }; // 缺省中国时区
     (((unix_secs as i64 + offset).rem_euclid(86_400)) * 1000) as u32
 }
 
-/// 取本地与 UTC 的偏移秒数（Windows: PowerShell；Unix: date +%z）。
-fn local_utc_offset_secs() -> i64 {
+/// 取本地与 UTC 的偏移秒数（仅 daemon 启动时同步调用一次）。
+pub fn local_utc_offset_secs() -> i64 {
     #[cfg(target_os = "windows")]
     {
         if let Ok(out) = std::process::Command::new("powershell")
@@ -154,17 +162,13 @@ fn local_utc_offset_secs() -> i64 {
                 return s;
             }
         }
-        8 * 3600 // 兜底：中国时区
+        8 * 3600
     }
     #[cfg(not(target_os = "windows"))]
     {
-        if let Ok(out) = std::process::Command::new("date")
-            .arg("+%z")
-            .output()
-        {
+        if let Ok(out) = std::process::Command::new("date").arg("+%z").output() {
             let s = String::from_utf8_lossy(&out.stdout);
             let s = s.trim();
-            // +0800 格式
             if s.len() == 5 {
                 let sign = if &s[0..1] == "-" { -1 } else { 1 };
                 let h: i64 = s[1..3].parse().unwrap_or(0);

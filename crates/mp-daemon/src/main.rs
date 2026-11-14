@@ -16,8 +16,10 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    // 冻结自检器：tokio 心跳计数器 15 秒不前进（runtime 级冻结，真机实测
-    // 连接 ~5 分钟后全任务消失、CPU 归零）→ cdb 自动抓全线程栈 + 退出重启。
+    // 启动时同步算好本地时区偏移（严禁在异步路径里 spawn PowerShell）
+    mp_core::tunnel::set_local_utc_offset(mp_core::tunnel::local_utc_offset_secs());
+
+    // 冻结自检器：主循环心跳 15 秒不前进 → cdb 抓栈（仅本地符号，20s 超时）+ 退出
     spawn_freeze_watchdog();
 
     let addr = std::env::var("MP_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:62000".into());
@@ -82,29 +84,40 @@ fn spawn_freeze_watchdog() {
                     continue;
                 }
                 if last_change.elapsed() >= std::time::Duration::from_secs(15) {
-                    // 冻结！抓栈（cdb 存在时）后自杀
-                    let dump = std::path::PathBuf::from(std::env::temp_dir())
-                        .join("opencode")
-                        .join("freeze_auto.txt");
+                    // 冻结！抓栈（cdb 仅本地符号 + 20s 超时；符号服务器下载会永久
+                    // 卡住并让目标线程保持挂起 —— 真机踩坑）后自杀
+                    let dir = std::path::PathBuf::from(std::env::temp_dir()).join("opencode");
+                    let _ = std::fs::create_dir_all(&dir);
+                    let out_path = dir.join("freeze_auto.txt");
                     let cdb = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe";
                     if std::path::Path::new(cdb).exists() {
-                        let _ = std::process::Command::new(cdb)
-                            .args([
-                                "-p".to_string(),
-                                std::process::id().to_string(),
-                                "-c".to_string(),
-                                "~* k 30; qd".to_string(),
-                                "-y".to_string(),
-                                format!(
-                                    "srv*C:\\symbols*https://msdl.microsoft.com/download/symbols;D:\\vscode_projects\\motion-pro\\target\\debug"
-                                ),
-                            ])
-                            .output();
+                        if let Ok(mut child) = std::process::Command::new(cdb)
+                            .arg("-p")
+                            .arg(std::process::id().to_string())
+                            .arg("-c")
+                            .arg("~* k 30; qd")
+                            .arg("-y")
+                            .arg("D:\\vscode_projects\\motion-pro\\target\\debug")
+                            .arg("-logo")
+                            .arg(&out_path)
+                            .spawn()
+                        {
+                            // 最多等 20s，防 cdb 卡死拖住 watchdog
+                            let start = std::time::Instant::now();
+                            loop {
+                                if child.try_wait().ok().flatten().is_some() {
+                                    break;
+                                }
+                                if start.elapsed() >= std::time::Duration::from_secs(20) {
+                                    let _ = child.kill();
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                            }
+                        }
                     }
                     let _ = std::fs::write(
-                        std::path::PathBuf::from(std::env::temp_dir())
-                            .join("opencode")
-                            .join("freeze_marker.txt"),
+                        dir.join("freeze_marker.txt"),
                         format!("frozen at {:?}", std::time::SystemTime::now()),
                     );
                     std::process::exit(3);
