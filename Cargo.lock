@@ -466,7 +466,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
- "wintun",
+ "wintun 0.5.1",
 ]
 
 [[package]]
@@ -487,7 +487,7 @@ dependencies = [
  "tracing",
  "tun",
  "windows-sys 0.52.0",
- "wintun",
+ "wintun 0.5.1",
 ]
 
 [[package]]
@@ -1108,7 +1108,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
- "wintun",
+ "wintun 0.3.2",
 ]
 
 [[package]]
@@ -1319,6 +1319,19 @@ dependencies = [
  "log",
  "thiserror 1.0.69",
  "windows",
+]
+
+[[package]]
+name = "wintun"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da99be64b5aa3de869c16977994314d0759a698d9a73ab0a5b1d52e2282033ae"
+dependencies = [
+ "c2rust-bitfields",
+ "libloading",
+ "log",
+ "thiserror 1.0.69",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

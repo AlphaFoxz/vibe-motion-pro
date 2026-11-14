@@ -22,7 +22,7 @@ mac_address = "1.2.1"
 
 # Windows：TunLink 直接持有 wintun Session（专职读写线程驱动）
 [target.'cfg(windows)'.dependencies]
-wintun = "0.3"
+wintun = "0.5"
 
 [dev-dependencies]
 rcgen = "0.13"
