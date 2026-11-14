@@ -245,6 +245,7 @@ pub fn pump_once(
 /// - `stream`：数据模式 TLS 流（`ControlClient::open_tunnel` 的返回值）
 /// - `tun`：TUN 适配器（mp-platform ChannelAdapter）
 /// - 停止：`stop` 置位后返回 Ok(())
+///
 /// TUN 出站过滤：只转发正经的单播业务包。
 /// - IPv4：组播(224/4)、受限广播(255.255.255.255)、子网定向广播(主机位全 1 的
 ///   /24 启发式)、环回(127/8)、0.0.0.0、保留段(240+/8) 全部丢弃
@@ -289,7 +290,6 @@ where
     stream_demux.feed(&[]); // no-op，保留接口对称
     let mut chunk = [0u8; 16_384];
     let mut last_log = std::time::Instant::now();
-    let mut tun_pkts_logged = 0u32;
     let mut wire_pkts_logged = 0u32;
     // 应答式心跳状态：收到对端心跳后待回（≥100ms 限频）
     let mut ka_reply = false;
@@ -477,12 +477,11 @@ mod tests {
     struct MockWire {
         to_wire: VecDeque<Vec<u8>>,
         from_wire: VecDeque<Vec<u8>>,
-        recv_chunk: usize,
     }
 
     impl MockWire {
         fn new() -> Self {
-            Self { to_wire: VecDeque::new(), from_wire: VecDeque::new(), recv_chunk: 4096 }
+            Self { to_wire: VecDeque::new(), from_wire: VecDeque::new() }
         }
         fn peer_send(&mut self, bytes: Vec<u8>) {
             self.to_wire.push_back(bytes);

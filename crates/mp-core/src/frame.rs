@@ -177,7 +177,7 @@ impl PacketStream {
         // 再按子类型分派（FUN_10062270：1=keepalive 2=杀隧道 4=速度端口）
         if version == 4 && self.buf.len() >= KEEPALIVE_LEN && self.buf[9] == 0xff {
             let total = u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize;
-            if total < KEEPALIVE_LEN || total > MAX_PACKET {
+            if !(KEEPALIVE_LEN..=MAX_PACKET).contains(&total) {
                 return Err(FrameError::TooLarge(total, MAX_PACKET));
             }
             if self.buf.len() < total {

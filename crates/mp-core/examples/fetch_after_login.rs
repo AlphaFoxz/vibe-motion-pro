@@ -53,13 +53,13 @@ async fn main() {
         "/prx/000/http/localhost/an_vpn.js",
         "/prx/000/http/localhost:65200/motionpro/postlogin/apps?_uname={UNAME}&_role=&_pid=0&_instid=default",
     ];
-    let out_dir = std::path::PathBuf::from(std::env::temp_dir()).join("opencode").join("gw");
+    let out_dir = std::env::temp_dir().join("opencode").join("gw");
     std::fs::create_dir_all(&out_dir).unwrap();
     for t in targets {
         let path = t.replace("{UNAME}", &user);
         match ag.get_public(&path, &mut session).await {
             Ok(resp) => {
-                let name = path.split('/').last().unwrap_or("x").split('?').next().unwrap_or("res");
+                let name = path.split('/').next_back().unwrap_or("x").split('?').next().unwrap_or("res");
                 let file = out_dir.join(format!("{}-{name}", resp.status));
                 std::fs::write(&file, &resp.body).unwrap();
                 println!("[probe] {} -> {} ({} bytes) saved {:?}", resp.status, path, resp.body.len(), file.file_name());

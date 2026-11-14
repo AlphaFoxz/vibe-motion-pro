@@ -345,7 +345,7 @@ impl ControlClient {
         session: &mut Session,
         form: &crate::protocol::LoginFormData,
     ) -> Result<(u16, Option<String>), ControlError> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let fut = async {
             let mut stream = self.connect_tls().await?;
             let body = form.to_prx_form_urlencoded();
@@ -567,7 +567,7 @@ impl ControlClient {
         // Q 载荷 = 220B JSON（真机 dump 实证）：
         // {"thread_number":4,"netpool_flag":1149184,"keepalive_interval":30,
         //  "allow_speed_tunnel":0,"speed_tunnel_encryption":0,...}
-        let dump_dir = std::path::PathBuf::from(std::env::temp_dir()).join("opencode");
+        let dump_dir = std::env::temp_dir().join("opencode");
         let _ = std::fs::create_dir_all(&dump_dir);
         let _ = std::fs::write(dump_dir.join("q_frame.bin"), &common_payload);
         let mut allow_speed_tunnel = false;
@@ -649,8 +649,7 @@ impl ControlClient {
                         // 真机 'U' 载荷是二进制结构（非 JSON）：启发式扫描 vIP/掩码/include 路由
                         netcfg = crate::protocol::NetworkConfig::from_binary(&payload);
                         // 布局取证：完整载荷落盘（%TEMP%/opencode/u_frame.bin）+ 头部 hex
-                        let dump_dir =
-                            std::path::PathBuf::from(std::env::temp_dir()).join("opencode");
+                        let dump_dir = std::env::temp_dir().join("opencode");
                         let _ = std::fs::create_dir_all(&dump_dir);
                         let _ = std::fs::write(dump_dir.join("u_frame.bin"), &payload);
                         tracing::debug!(
@@ -745,7 +744,7 @@ impl ControlClient {
                 tracing::info!("clientid frame sent ({}B)", cid_frame.len());
             }
         }
-        return Ok((stream, common_payload, netcfg, pending));
+        Ok((stream, common_payload, netcfg, pending))
     }
 }
 

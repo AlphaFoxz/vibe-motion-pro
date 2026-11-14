@@ -8,12 +8,13 @@
 //!   3. 异步路径 `cached.lock()` 同步抢锁 —— 服务器侧停止下发数据后，
 //!      tokio worker 线程逐个卡死在这把锁上，**整个 runtime 冻结**
 //!      （真机实测：连接 ~5 分钟后全任务消失、CPU 归零、无任何日志）
-//!   现改为 mp-daemon 的专职读写 std 线程直接驱动 Session（阻塞只发生在
-//!   自有线程上），彻底绕开 tun crate 的 async 机制。
+//!
+//! 现改为 mp-daemon 的专职读写 std 线程直接驱动 Session（阻塞只发生在
+//! 自有线程上），彻底绕开 tun crate 的 async 机制。
 //! - 非 Windows：`tun` crate（/dev/net/tun、utun），行为不变
 //! - `TunAdapter` 提供阻塞式 `read_packet`/`write_packet`，
 //!   供 mp-daemon 用独立线程跑阻塞读写，再经 mpsc 桥接进 mp-core 数据面
-//!     见 mp-core::dataplane::ChannelAdapter）
+//!   （见 mp-core::dataplane::ChannelAdapter）
 //! - wintun.dll 需随应用分发（build.rs 拷贝到 exe 旁）
 
 use crate::PlatformError;

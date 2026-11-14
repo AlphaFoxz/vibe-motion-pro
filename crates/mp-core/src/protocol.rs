@@ -284,9 +284,12 @@ pub fn encode_config_frame(kind: ConfigMsgType, payload: &[u8]) -> Vec<u8> {
     f
 }
 
+/// 配置帧解码结果：`Some(Ok((消息类型, 载荷, 总长)))`；缓冲不足为 `None`，格式非法为 `Err(())`。
+pub type DecodedConfigFrame = Option<Result<(ConfigMsgType, Vec<u8>, usize), ()>>;
+
 /// 解码配置帧；缓冲不足返回 `None`，格式非法返回 `Err(())`。
 /// 长度字段读 [12..16]（真机实测对齐 'T' 请求布局）。
-pub fn decode_config_frame(buf: &[u8]) -> Option<Result<(ConfigMsgType, Vec<u8>, usize), ()>> {
+pub fn decode_config_frame(buf: &[u8]) -> DecodedConfigFrame {
     if buf.len() < CONFIG_FRAME_HEADER_LEN {
         return None;
     }

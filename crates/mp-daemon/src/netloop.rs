@@ -68,23 +68,23 @@ pub struct TunnelPump {
 
 impl TunnelPump {
     pub fn spawn<S>(
-        mut stream: S,
+        stream: S,
         leftover: Vec<u8>,
-        keepalive_interval: std::time::Duration,
     ) -> Self
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         let (tun, _net_tx, _net_rx) = ChannelAdapter::pair(256);
-        Self::spawn_with(stream, leftover, tun, keepalive_interval)
+        Self::spawn_with(stream, leftover, tun)
     }
 
     /// 用外部通道对组装（daemon 生产路径：内核侧端点由调用方交给 TunLink）。
+    /// 心跳不收外部参数：内层 TCP 心跳固定 200ms（见函数内注释）；
+    /// 协议级 30s keepalive 见 mp_core::protocol::KEEPALIVE_INTERVAL_SECS。
     pub fn spawn_with<S, A>(
         mut stream: S,
         leftover: Vec<u8>,
         mut tun: A,
-        keepalive_interval: std::time::Duration,
     ) -> Self
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -175,7 +175,7 @@ mod tests {
             }
         });
 
-        let pump = TunnelPump::spawn(client, Vec::new(), std::time::Duration::from_secs(30));
+        let pump = TunnelPump::spawn(client, Vec::new());
         pump.shutdown().await.unwrap();
         let _ = peer.await;
     }
@@ -206,7 +206,7 @@ mod tests {
         });
 
         let (adapter, kernel_tx, mut kernel_rx) = TokioChannelAdapter::pair(64);
-        let pump = TunnelPump::spawn_with(client, Vec::new(), adapter, std::time::Duration::from_secs(30));
+        let pump = TunnelPump::spawn_with(client, Vec::new(), adapter);
         // 下行：内核通道收到包
         let down = tokio::time::timeout(Duration::from_secs(2), kernel_rx.recv())
             .await
@@ -243,7 +243,7 @@ mod tests {
 
         let (client, _server) = duplex(64 * 1024);
         let (adapter, _kernel_tx, mut kernel_rx) = TokioChannelAdapter::pair(16);
-        let pump = TunnelPump::spawn_with(client, leftover, adapter, std::time::Duration::from_secs(30));
+        let pump = TunnelPump::spawn_with(client, leftover, adapter);
         let got = tokio::time::timeout(Duration::from_secs(2), kernel_rx.recv())
             .await
             .unwrap()

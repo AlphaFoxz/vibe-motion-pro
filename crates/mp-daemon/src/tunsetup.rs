@@ -255,9 +255,8 @@ mod tests {
         // 非管理员环境：打开网卡失败 → Err（调用方降级不阻断）；有管理员则正常接线
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (_tx2, rx2) = tokio::sync::mpsc::channel(16);
-        match TunLink::bring_up(tx, rx2, None, None, vec![], &[]).await {
-            Ok(mut link) => link.teardown(),
-            Err(_) => {}
+        if let Ok(mut link) = TunLink::bring_up(tx, rx2, None, None, vec![], &[]).await {
+            link.teardown();
         }
     }
 

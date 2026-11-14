@@ -206,7 +206,6 @@ impl Device for AdapterDevice<'_> {
 pub struct Dataplane {
     iface: Interface,
     sockets: SocketSet<'static>,
-    device_tx_out: VecDeque<Vec<u8>>,
     // device 每次调用期间临时借用 adapter，这里持有方式见 poll_with
 }
 
@@ -225,7 +224,6 @@ impl Dataplane {
         Self {
             iface,
             sockets: SocketSet::new(Vec::new()),
-            device_tx_out: VecDeque::new(),
         }
     }
 

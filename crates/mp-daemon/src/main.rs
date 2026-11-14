@@ -86,7 +86,7 @@ fn spawn_freeze_watchdog() {
                 if last_change.elapsed() >= std::time::Duration::from_secs(15) {
                     // 冻结！抓栈（cdb 仅本地符号 + 20s 超时；符号服务器下载会永久
                     // 卡住并让目标线程保持挂起 —— 真机踩坑）后自杀
-                    let dir = std::path::PathBuf::from(std::env::temp_dir()).join("opencode");
+                    let dir = std::env::temp_dir().join("opencode");
                     let _ = std::fs::create_dir_all(&dir);
                     let out_path = dir.join("freeze_auto.txt");
                     let cdb = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe";

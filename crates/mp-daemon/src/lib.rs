@@ -1,7 +1,7 @@
 //! mp-daemon 库部分：可测试的连接处理逻辑。
 //! main.rs 仅负责启动。
 
-use mp_core::profile::{Profile, ProfileError, ProfileStore};
+use mp_core::profile::{Profile, ProfileStore};
 use mp_core::session::{Credentials, TunnelType};
 use mp_core::{Engine, VpnStatus};
 
@@ -28,7 +28,7 @@ pub async fn connect_with_login(
     ),
     String,
 > {
-    use mp_core::control::{ControlClient, ControlError, Session};
+    use mp_core::control::{ControlClient, Session};
     use mp_core::protocol::{LoginFormData, PostloginApps, TunnelOpenParams};
 
     // TODO(安全): 接入 rootca 严格校验后移除 danger 标志
@@ -151,12 +151,7 @@ pub async fn connect_with_login(
 
     // 4. 数据面泵 + TUN 网卡接线（通道对两端分别交给泵与内核异步网桥）
     let (adapter, kernel_tx, kernel_rx) = mp_core::dataplane::TokioChannelAdapter::pair(256);
-    let pump = netloop::TunnelPump::spawn_with(
-        stream,
-        leftover,
-        adapter,
-        std::time::Duration::from_secs(mp_core::protocol::KEEPALIVE_INTERVAL_SECS),
-    );
+    let pump = netloop::TunnelPump::spawn_with(stream, leftover, adapter);
     // TUN 接线失败（无管理员/wintun）→ 降级：隧道照常，仅无本地转发
     // include 路由（'U' 解析的 split tunnel 网段 → CIDR 前缀形式交给 RouteManager）
     let include_routes: Vec<String> = netcfg
@@ -257,29 +252,6 @@ pub fn device_identity() -> DeviceIdentity {
         .unwrap_or_else(|| "motionpro-rs-fallback-deviceid".into());
     let cpuid = read_reg("cpuid").filter(|s| !s.is_empty()).unwrap_or_default();
     DeviceIdentity { clientid, cpuid }
-}
-
-/// 日志脱敏：把 JSON 里指定字符串键的值打码（"key":"val" → "key":"***"）。
-fn redact_json_value(body: &str, key: &str) -> String {
-    let pat = format!("\"{key}\":\"");
-    let mut out = String::with_capacity(body.len());
-    let mut rest = body;
-    while let Some(pos) = rest.find(&pat) {
-        out.push_str(&rest[..pos + pat.len()]);
-        let after = &rest[pos + pat.len()..];
-        match after.find('"') {
-            Some(end) => {
-                out.push_str("***\"");
-                rest = &after[end + 1..];
-            }
-            None => {
-                out.push_str(after);
-                return out;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// 简易 uuid（v4 形态，验证码会话关联用，无密码学要求）。
@@ -640,7 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_broadcast_pushed_to_client() {
-        let (client, mut server) = tokio::io::duplex(4096);
+        let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
         let mut st = state();
 
@@ -762,7 +734,7 @@ mod tests {
     async fn read_http_request(
         tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     ) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncReadExt;
         let mut buf = Vec::with_capacity(4096);
         let mut chunk = [0u8; 4096];
         loop {
@@ -985,7 +957,7 @@ mod tests {
                 let acceptor = acceptor.clone();
                 let port = port;
                 tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    use tokio::io::AsyncWriteExt;
                     let Ok(mut tls) = acceptor.accept(sock).await else { return };
                     let req = read_http_request(&mut tls).await;
                     if req.starts_with("GET / ") {
