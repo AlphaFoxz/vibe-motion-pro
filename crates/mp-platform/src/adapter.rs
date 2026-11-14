@@ -1,7 +1,9 @@
 //! 真实虚拟网卡适配器（对齐原版 vl3vpn.dll 的虚拟网卡能力）。
 //!
 //! 实现策略（按平台分裂，Windows 有重大教训）：
-//! - **Windows：直接使用 `wintun` crate（0.3）**。
+//! - **Windows：直接使用 `wintun` crate（0.5，2026-11-14 从 0.3 升级 —— 0.3.2 钉死
+//!   windows ^0.51 全家桶，0.5.1 改用 windows-sys ^0.52 与本 crate 一致；API 兼容零改动，
+//!   见 commit 993b564）。**
 //!   曾经走 `tun` crate 0.6.1 的 async 层，但其 `poll_read` 实现存在致命缺陷：
 //!   1. 每次无数据 poll 都 `thread::spawn` 一个阻塞读线程（线程泄漏）
 //!   2. 该线程**持有 std Mutex 调用 `receive_blocking()`**（持锁无限期等待）
