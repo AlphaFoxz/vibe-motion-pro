@@ -33,9 +33,10 @@ pub struct BridgeHandle {
     writer: Option<std::thread::JoinHandle<()>>,
     #[cfg(not(target_os = "windows"))]
     task: Option<tokio::task::JoinHandle<()>>,
-    /// wintun 会话（teardown 时 shutdown 解除读线程阻塞）
+    /// 会话句柄（teardown 时 shutdown 解除读线程阻塞；
+    /// 平台类型由 mp-platform::SessionHandle 封装，daemon 不依赖 wintun crate）
     #[cfg(target_os = "windows")]
-    session: Option<std::sync::Arc<wintun::Session>>,
+    session: Option<mp_platform::adapter::SessionHandle>,
 }
 
 impl BridgeHandle {
@@ -44,7 +45,7 @@ impl BridgeHandle {
         #[cfg(target_os = "windows")]
         {
             if let Some(s) = self.session.take() {
-                let _ = s.shutdown(); // 解除 receive_blocking 阻塞
+                s.shutdown(); // 解除 receive_blocking 阻塞
             }
             // 线程随通道关闭自行退出，不 join（writer 可能还阻塞在通道上）
             self.reader = None;
@@ -116,11 +117,11 @@ impl TunLink {
                             break;
                         }
                         match reader_session.receive_blocking() {
-                            Ok(pkt) => {
+                            Some(pkt) => {
                                 // try_send + 满即丢：TCP 自己会重传，内核侧专职
                                 // 线程绝不能在满通道上永久阻塞（真机冻结栈实锤：
                                 // blocking_send 卡死 → 泵死无人消费 → 连锁冻结）
-                                match kernel_tx.try_send(pkt.bytes().to_vec()) {
+                                match kernel_tx.try_send(pkt) {
                                     Ok(()) => {}
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                         // 丢弃：等待 1ms 再读，避免空转
@@ -129,7 +130,7 @@ impl TunLink {
                                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                                 }
                             }
-                            Err(_) => break, // 会话关闭/停机
+                            None => break, // 会话关闭/停机
                         }
                     }
                 })
@@ -146,15 +147,8 @@ impl TunLink {
                         }
                         match kernel_rx.blocking_recv() {
                             Some(pkt) => {
-                                if pkt.len() > u16::MAX as usize {
-                                    continue;
-                                }
-                                if let Ok(mut p) =
-                                    writer_session.allocate_send_packet(pkt.len() as u16)
-                                {
-                                    p.bytes_mut().copy_from_slice(&pkt);
-                                    writer_session.send_packet(p);
-                                }
+                                // 超长包在 SessionHandle::send 内丢弃
+                                let _ = writer_session.send(&pkt);
                             }
                             None => break, // 隧道侧已关
                         }

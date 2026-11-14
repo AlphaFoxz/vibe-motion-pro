@@ -466,7 +466,6 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
- "wintun 0.5.1",
 ]
 
 [[package]]

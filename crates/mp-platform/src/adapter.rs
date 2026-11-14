@@ -100,13 +100,8 @@ pub mod imp {
         }
 
         /// wintun 会话句柄（Send+Sync；专职线程阻塞驱动的正确载体）。
-        pub fn session(&self) -> std::sync::Arc<wintun::Session> {
-            self.session.clone()
-        }
-
-        /// 关闭会话（解除阻塞读线程的等待）。
-        pub fn shutdown_session(&self) {
-            let _ = self.session.shutdown();
+        pub fn session(&self) -> SessionHandle {
+            SessionHandle(self.session.clone())
         }
 
         /// 阻塞读取一个来自内核的 IP 包（仅在专职线程上使用）。
@@ -133,10 +128,43 @@ pub mod imp {
             Ok(n)
         }
     }
+
+    /// 可跨线程克隆的会话句柄：mp-daemon 的专职读写线程用它阻塞驱动网卡。
+    /// 平台类型不外漏 —— daemon 不直接依赖 wintun crate，只认这个抽象。
+    #[derive(Clone)]
+    pub struct SessionHandle(std::sync::Arc<wintun::Session>);
+
+    impl SessionHandle {
+        /// 阻塞读一个来自内核的 IP 包（仅在专职线程上使用）。
+        /// 会话关闭/停机返回 None。
+        pub fn receive_blocking(&self) -> Option<Vec<u8>> {
+            self.0.receive_blocking().ok().map(|p| p.bytes().to_vec())
+        }
+
+        /// 写一个 IP 包到内核（拷入环形缓冲，非阻塞；超长包丢弃返回 false）。
+        pub fn send(&self, packet: &[u8]) -> bool {
+            if packet.len() > u16::MAX as usize {
+                return false;
+            }
+            match self.0.allocate_send_packet(packet.len() as u16) {
+                Ok(mut p) => {
+                    p.bytes_mut().copy_from_slice(packet);
+                    self.0.send_packet(p);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+
+        /// 关闭会话（解除阻塞读线程的等待）。
+        pub fn shutdown(&self) {
+            let _ = self.0.shutdown();
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
-pub use imp::TunAdapter;
+pub use imp::{SessionHandle, TunAdapter};
 
 // ===================== 非 Windows：tun crate（utun / /dev/net/tun） =====================
 
