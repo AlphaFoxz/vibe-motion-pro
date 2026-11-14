@@ -66,26 +66,68 @@ pub fn windows_route_add(
     Ok(argv)
 }
 
-/// 解析适配器接口索引：`route print` 头部接口列表（"  16 ... mp-tun ..."）。
-/// 直接调系统命令，不依赖 runner（探针/测试也安全，失败返回 None）。
+/// 解析适配器接口索引。Win32 GetAdaptersAddresses 直查（零子进程）：
+/// 真机冻结实证（freeze_auto.txt）—— 在 async 线程 spawn `route print` 73 次，
+/// 管道读取 WaitForMultipleObjects 永久挂起。API 调用 <1ms，失败返回 None。
+#[cfg(target_os = "windows")]
 pub fn windows_if_index(interface: &str) -> Option<u32> {
-    let out = std::process::Command::new("route")
-        .arg("print")
-        .output()
-        .ok()?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    // 接口列表段：每行 "  索引 ... 适配器名"
-    for line in text.lines() {
-        if line.contains(interface) {
-            if let Some(idx) = line.split_whitespace().next().and_then(|t| t.parse().ok()) {
-                return Some(idx);
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST,
+        GAA_FLAG_SKIP_UNICAST, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+
+    const FLAGS: u32 =
+        GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST;
+    unsafe {
+        let mut size: u32 = 0;
+        // 第一次调用取所需缓冲大小（预期返回 ERROR_BUFFER_OVERFLOW）
+        GetAdaptersAddresses(
+            AF_INET as u32,
+            FLAGS,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        );
+        if size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let rc = GetAdaptersAddresses(
+            AF_INET as u32,
+            FLAGS,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+            &mut size,
+        );
+        if rc != 0 {
+            tracing::warn!("GetAdaptersAddresses failed: {rc}");
+            return None;
+        }
+        let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        while !cur.is_null() {
+            let a = &*cur;
+            if !a.FriendlyName.is_null() {
+                let mut len = 0usize;
+                while *a.FriendlyName.add(len) != 0 {
+                    len += 1;
+                }
+                let name = String::from_utf16_lossy(std::slice::from_raw_parts(
+                    a.FriendlyName,
+                    len,
+                ));
+                if name.eq_ignore_ascii_case(interface) {
+                    return Some(a.Anonymous1.Anonymous.IfIndex);
+                }
             }
+            cur = a.Next as *const IP_ADAPTER_ADDRESSES_LH;
         }
     }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn windows_if_index(_interface: &str) -> Option<u32> {
     None
 }
 

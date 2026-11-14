@@ -81,7 +81,17 @@ impl TunLink {
             mtu: 1400,
         };
 
-        let adapter = TunAdapter::open(&cfg).map_err(|e| e.to_string())?;
+        // 网卡创建（wintun 驱动交互 + netsh MTU）也含阻塞调用，挪出 async 线程
+        let adapter = {
+            let cfg = cfg.clone();
+            let spawned = std::thread::Builder::new()
+                .name("mp-adapter-open".into())
+                .spawn(move || TunAdapter::open(&cfg).map_err(|e| e.to_string()))
+                .map_err(|e| format!("spawn adapter open: {e}"))?;
+            spawned
+                .join()
+                .map_err(|_| "adapter open thread panicked".to_string())??
+        };
         let iface = adapter.name.clone();
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -177,29 +187,43 @@ impl TunLink {
             BridgeHandle { task: Some(task) }
         };
 
-        // 路由/DNS 接管：仅当服务器明确下发了虚拟 IP 才动系统网络（安全默认）
-        let mut mgr = RouteManager::new(Arc::new(SystemRunner), &ip.to_string(), &iface);
-        let mut route_mgr = None;
-        if veth_ip.is_some() {
-            let mut applied = false;
-            for r in routes {
-                match mgr.add_route(r) {
-                    Ok(()) => applied = true,
-                    Err(e) => tracing::warn!("add_route {r} failed: {e}"),
-                }
-            }
-            if !dns.is_empty() {
-                let servers: Vec<String> = dns.iter().map(|d| d.to_string()).collect();
-                if mgr.set_dns(&servers).is_ok() {
-                    applied = true;
-                }
-            }
-            if applied {
-                route_mgr = Some(mgr);
-            }
-        }
+        // 路由/DNS 接管：仅当服务器明确下发了虚拟 IP 才动系统网络（安全默认）。
+        // 全部子进程操作挪进 spawn_blocking：route/netsh 是同步阻塞调用，
+        // 直接在 async 线程跑会把主循环心跳饿死（freeze_auto.txt 实证，
+        // 73 条路由 × 每条 2 个子进程阻塞 >15s → 冻结看门狗开火）。
+        let mgr = {
+            let iface = iface.clone();
+            let gw = ip.to_string();
+            let routes: Vec<String> = routes.to_vec();
+            let dns: Vec<String> = dns.iter().map(|d| d.to_string()).collect();
+            let enabled = veth_ip.is_some();
+            let spawned = std::thread::Builder::new()
+                .name("mp-route-setup".into())
+                .spawn(move || {
+                    if !enabled {
+                        return None;
+                    }
+                    let mut mgr = RouteManager::new(Arc::new(SystemRunner), &gw, &iface);
+                    let mut applied = false;
+                    for r in &routes {
+                        match mgr.add_route(r) {
+                            Ok(()) => applied = true,
+                            Err(e) => tracing::warn!("add_route {r} failed: {e}"),
+                        }
+                    }
+                    if !dns.is_empty() && mgr.set_dns(&dns).is_ok() {
+                        applied = true;
+                    }
+                    applied.then_some(mgr)
+                })
+                .map_err(|e| format!("spawn route setup: {e}"))?;
+            // 等待设置线程完成（连接流程本就必须等路由就绪才能通告已连接）
+            spawned
+                .join()
+                .map_err(|_| "route setup thread panicked".to_string())?
+        };
 
-        Ok(Self { stop, bridge, routes: route_mgr, iface })
+        Ok(Self { stop, bridge, routes: mgr, iface })
     }
 
     /// 停止网桥并回滚路由/DNS（幂等）。

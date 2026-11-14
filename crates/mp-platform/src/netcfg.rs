@@ -21,13 +21,51 @@ pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
     fn run(&self, argv: &[String]) -> Result<String, PlatformError> {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const CMD_TIMEOUT: Duration = Duration::from_secs(15);
+
         if argv.is_empty() {
             return Err(PlatformError::Route("empty argv".into()));
         }
-        let out = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd
+            .spawn()
             .map_err(|e| PlatformError::Route(format!("spawn {} failed: {e}", argv[0])))?;
+        // 轮询等待 + 超时击杀：子进程（route/netsh）偶发永久挂起时不能拖死整个流程
+        let deadline = Instant::now() + CMD_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        return Err(PlatformError::Route(format!(
+                            "{} timed out after {:?}",
+                            argv[0],
+                            CMD_TIMEOUT
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                Err(e) => {
+                    return Err(PlatformError::Route(format!("wait {}: {e}", argv[0])));
+                }
+            }
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| PlatformError::Route(format!("read {} output: {e}", argv[0])))?;
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if !out.status.success() {
             return Err(PlatformError::Route(format!("{} exited {:?}: {}", argv[0], out.status.code(), text)));
@@ -35,6 +73,9 @@ impl CommandRunner for SystemRunner {
         Ok(text)
     }
 }
+
+#[cfg(target_os = "windows")]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 测试/演练执行器：只记录，不执行，永远成功。
 #[derive(Default, Clone)]

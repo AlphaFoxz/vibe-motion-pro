@@ -77,13 +77,22 @@ pub mod imp {
                     .start_session(wintun::MAX_RING_CAPACITY)
                     .map_err(|e| PlatformError::Adapter(format!("start session: {e}")))?,
             );
-            // 接口 MTU（尽力而为；wintun 环形缓冲不受此限制）
-            let _ = std::process::Command::new("netsh")
-                .args([
-                    "interface", "ipv4", "set", "subinterface",
-                    &cfg.name, format!("mtu={}", cfg.mtu).as_str(), "store=persistent",
-                ])
-                .output();
+            // 接口 MTU（尽力而为；wintun 环形缓冲不受此限制）。
+            // 复用 SystemRunner：带 15s 超时 + CREATE_NO_WINDOW（裸 .output()
+            // 曾在真机永久挂起）。
+            let _ = crate::netcfg::CommandRunner::run(
+                &crate::netcfg::SystemRunner,
+                &[
+                    "netsh".into(),
+                    "interface".into(),
+                    "ipv4".into(),
+                    "set".into(),
+                    "subinterface".into(),
+                    cfg.name.clone(),
+                    format!("mtu={}", cfg.mtu),
+                    "store=persistent".into(),
+                ],
+            );
             Ok(Self { session, _adapter: adapter, name: cfg.name.clone(), mtu: cfg.mtu })
         }
 
