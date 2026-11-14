@@ -56,8 +56,13 @@
 - [x] Linux/Ubuntu 支持落地（2026-11-14 第二批）：WSL Ubuntu(musl 静态) 86 测试全绿 +
       运行时冒烟（daemon IPC Status 往返）；NetBackend 三平台策略注入（linux:
       `ip route replace` + `resolvectl dns/default-route`）；daemon 清零平台
-      cfg（TunLink 下沉 mp-platform，hostname / 设备身份三平台化并真正持久化）；
-      无 systemd-resolved 环境的 resolv.conf 直写回退、macOS 服务名映射待后续
+      cfg（TunLink 下沉 mp-platform，hostname / 设备身份三平台化并真正持久化）
+- [x] DNS 策略补全（2026-11-14 第三批）：DnsPlan 命令式/文件改写式双路径 ——
+      Linux 无 systemd-resolved（Ubuntu Server 最小安装等）时直写 /etc/resolv.conf
+      （快照字节级还原，原文件不存在则还原即删除）；macOS DNS 目标改为运行期
+      解析的首选网络服务（networksetup 参数是服务名非接口名）并基于
+      -getdnsservers 快照还原（不再固定 empty 抹掉用户静态 DNS）；
+      revert 改为尽力而为清理（网卡先关、内核已清路由是常态，失败仅告警）
 
 ### 阶段3 UI 功能对齐
 
