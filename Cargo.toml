@@ -23,6 +23,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 smoltcp = "0.11"
+dirs = "6"
 
 # daemon / platform 特权侧（路由/DNS 管理与 IPC 序列化按平台再选型：
 # Windows 直用 windows-sys；IPC 走 JSON —— 引入新依赖时再在 workspace 声明）

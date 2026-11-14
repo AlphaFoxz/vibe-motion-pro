@@ -24,9 +24,16 @@ async fn main() -> anyhow::Result<()> {
     spawn_freeze_watchdog();
 
     let addr = std::env::var("MP_IPC_ADDR").unwrap_or_else(|_| "127.0.0.1:62000".into());
+    // Profile 路径：MP_PROFILES 覆盖；默认三平台配置目录
+    // （Windows %APPDATA% / macOS ~/Library/Application Support / Linux $XDG_CONFIG_HOME）。
+    // 原来直取 APPDATA 在非 Windows 上是 unset，会静默落到当前目录。
     let profiles_path = std::env::var("MP_PROFILES").unwrap_or_else(|_| {
-        let cfg = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-        PathBuf::from(cfg).join("MotionPro").join("profiles.toml").display().to_string()
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("MotionPro")
+            .join("profiles.toml")
+            .display()
+            .to_string()
     });
     let store = ProfileStore::load(Path::new(&profiles_path))?;
     tracing::info!("loaded {} profiles from {}", store.list().len(), profiles_path);
@@ -118,38 +125,11 @@ fn spawn_freeze_watchdog() {
                     continue;
                 }
                 if last_change.elapsed() >= std::time::Duration::from_secs(15) {
-                    // 冻结！抓栈（cdb 仅本地符号 + 20s 超时；符号服务器下载会永久
-                    // 卡住并让目标线程保持挂起 —— 真机踩坑）后自杀
-                    let dir = std::env::temp_dir().join("opencode");
+                    // 冻结！抓栈（仅本地符号 + 20s 超时，见 dump_all_thread_stacks）
+                    // 后自杀
+                    let dir = std::env::temp_dir().join("motionpro");
                     let _ = std::fs::create_dir_all(&dir);
-                    let out_path = dir.join("freeze_auto.txt");
-                    let cdb = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe";
-                    if std::path::Path::new(cdb).exists() {
-                        if let Ok(mut child) = std::process::Command::new(cdb)
-                            .arg("-p")
-                            .arg(std::process::id().to_string())
-                            .arg("-c")
-                            .arg("~* k 30; qd")
-                            .arg("-y")
-                            .arg("D:\\vscode_projects\\motion-pro\\target\\debug")
-                            .arg("-logo")
-                            .arg(&out_path)
-                            .spawn()
-                        {
-                            // 最多等 20s，防 cdb 卡死拖住 watchdog
-                            let start = std::time::Instant::now();
-                            loop {
-                                if child.try_wait().ok().flatten().is_some() {
-                                    break;
-                                }
-                                if start.elapsed() >= std::time::Duration::from_secs(20) {
-                                    let _ = child.kill();
-                                    break;
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(200));
-                            }
-                        }
-                    }
+                    dump_all_thread_stacks(&dir.join("freeze_auto.txt"));
                     let _ = std::fs::write(
                         dir.join("freeze_marker.txt"),
                         format!("frozen at {:?}", std::time::SystemTime::now()),
@@ -159,4 +139,48 @@ fn spawn_freeze_watchdog() {
             }
         })
         .expect("spawn freeze watchdog");
+}
+
+/// cdb 抓全线程栈（Windows 诊断用；无 cdb 则静默跳过，mac/Linux 直接走 exit）。
+/// 路径全部可环境变量覆盖，默认值不再含开发机绝对路径：
+/// - `MP_CDB`：cdb.exe 位置（默认 Windows Kits 附带路径）
+/// - `MP_SYMBOLS`：符号目录（默认 exe 所在目录 —— 开发期 pdb 就在旁边）
+/// 注意：cdb 只用本地符号（符号服务器下载会永久卡住并让目标线程保持挂起，
+/// 真机踩坑），最多等 20s 防止卡死拖住 watchdog。
+fn dump_all_thread_stacks(out_path: &std::path::Path) {
+    let cdb = std::env::var("MP_CDB").unwrap_or_else(|_| {
+        r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe".to_string()
+    });
+    if !std::path::Path::new(&cdb).exists() {
+        return;
+    }
+    let symbols = std::env::var("MP_SYMBOLS").unwrap_or_else(|_| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.display().to_string()))
+            .unwrap_or_default()
+    });
+    if let Ok(mut child) = std::process::Command::new(&cdb)
+        .arg("-p")
+        .arg(std::process::id().to_string())
+        .arg("-c")
+        .arg("~* k 30; qd")
+        .arg("-y")
+        .arg(&symbols)
+        .arg("-logo")
+        .arg(out_path)
+        .spawn()
+    {
+        let start = std::time::Instant::now();
+        loop {
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            if start.elapsed() >= std::time::Duration::from_secs(20) {
+                let _ = child.kill();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
 }
