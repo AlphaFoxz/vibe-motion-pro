@@ -6,11 +6,12 @@ on:
     branches: [master]
 
 jobs:
-  # crates/*（default-members）：mp-app 之外的部分三平台无额外系统依赖
+  # crates/*（default-members）：无额外系统依赖
+  # macOS 暂缓（当前只发 win/linux）；恢复时把 macos-latest 加回各矩阵
   rust:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +23,7 @@ jobs:
   app:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -44,12 +45,12 @@ jobs:
           pnpm install --registry=https://registry.npmjs.org
           pnpm build
       - run: cargo check -p mp-app
-  # 三平台打包冒烟（不签名）：提前暴露 bundler/图标/资源问题，产物上传供人工检查。
+  # win/linux 打包冒烟（不签名）：提前暴露 bundler/图标/资源问题，产物上传供人工检查。
   # 产物在根 target/（src-tauri 已并入 workspace）。签名/notarization 留待阶段4。
   bundle:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -77,12 +78,14 @@ jobs:
         run: |
           pnpm install --registry=https://registry.npmjs.org
           pnpm tauri build --bundles deb,appimage
-      - name: bundle (macos)
-        if: runner.os == 'macOS'
-        working-directory: app
-        run: |
-          pnpm install --registry=https://registry.npmjs.org
-          pnpm tauri build --bundles app,dmg
+      # macOS 暂缓（当前只发 win/linux）。恢复时取消注释、矩阵加回 macos-latest，
+      # 并在 upload 的 path 里补回 dmg/*.dmg 与 macos/*.app 两行：
+      # - name: bundle (macos)
+      #   if: runner.os == 'macOS'
+      #   working-directory: app
+      #   run: |
+      #     pnpm install --registry=https://registry.npmjs.org
+      #     pnpm tauri build --bundles app,dmg
       - name: upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -91,8 +94,6 @@ jobs:
             target/release/bundle/nsis/*.exe
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/macos/*.app
           if-no-files-found: error
   frontend:
     runs-on: ubuntu-latest
