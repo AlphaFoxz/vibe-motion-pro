@@ -1,6 +1,7 @@
-# MotionPro VPN Client — 跨平台重写
+# vibe-motion-pro（VibeMotionPro）— MotionPro VPN 跨平台重写
 
 原 Windows 版 MotionPro VPN 客户端（C++ / Qt5，仓库意外丢失）的跨平台重写项目。
+产品名 **VibeMotionPro**，仓库/包名 **vibe-motion-pro**。
 目标：Windows / macOS / Linux 一比一功能复刻 + 技术升级，构建产物为原生应用。
 
 > 本仓库以 **AI 自迭代**方式维护，协作约定见 [AGENT.md](AGENT.md)。

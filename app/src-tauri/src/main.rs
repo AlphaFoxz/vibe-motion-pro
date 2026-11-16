@@ -153,7 +153,7 @@ fn handle_status(app: &AppHandle, snap: StatusSnapshot) {
             let _ = app
                 .notification()
                 .builder()
-                .title("MotionPro")
+                .title("VibeMotionPro")
                 .body("VPN 已连接 · Connected")
                 .show();
             if AUTO_HIDE.load(Ordering::Relaxed) {
@@ -171,7 +171,7 @@ fn handle_status(app: &AppHandle, snap: StatusSnapshot) {
             let _ = app
                 .notification()
                 .builder()
-                .title("MotionPro")
+                .title("VibeMotionPro")
                 .body("VPN 已断开 · Disconnected")
                 .show();
         }
@@ -187,10 +187,10 @@ fn handle_status(app: &AppHandle, snap: StatusSnapshot) {
             }
             let _ = ui
                 .tray
-                .set_tooltip(Some(format!("MotionPro — {}", state_label(&cur, lang))));
+                .set_tooltip(Some(format!("VibeMotionPro — {}", state_label(&cur, lang))));
             let _ = ui
                 .status_item
-                .set_text(format!("MotionPro — {}", state_label(&cur, lang)).as_str());
+                .set_text(format!("VibeMotionPro — {}", state_label(&cur, lang)).as_str());
             let busy = matches!(cur.as_str(), "connecting" | "reconnecting");
             let _ = ui.connect_item.set_enabled(cur != "connected" && !busy);
             let _ = ui.disconnect_item.set_enabled(cur == "connected" || busy);
@@ -379,7 +379,7 @@ async fn profile_remove(state: State<'_, AppState>, profile_id: String) -> Resul
 // ---------- OS 凭据管理器（记住密码） ----------
 
 fn keyring_entry(profile_id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new("MotionPro", &format!("vpn-pass:{profile_id}")).map_err(|e| e.to_string())
+    keyring::Entry::new("VibeMotionPro", &format!("vpn-pass:{profile_id}")).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -458,7 +458,7 @@ fn set_tray_texts(
             // 状态行按当前状态刷新
             let cur = state.last_state.lock().unwrap().clone();
             ui.status_item
-                .set_text(format!("MotionPro — {}", state_label(&cur, recognized)).as_str())
+                .set_text(format!("VibeMotionPro — {}", state_label(&cur, recognized)).as_str())
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -493,7 +493,7 @@ fn main() {
 
             // 托盘：三态图标 + 菜单（状态行禁用项 / 显示窗口 / 连接 / 断开 / 退出）
             let status_item =
-                MenuItem::with_id(&handle, "status-line", "MotionPro — 未连接", false, None::<&str>)?;
+                MenuItem::with_id(&handle, "status-line", "VibeMotionPro — 未连接", false, None::<&str>)?;
             let show_item = MenuItem::with_id(&handle, "show", "显示主窗口", true, None::<&str>)?;
             let connect_item = MenuItem::with_id(&handle, "tray-connect", "连接…", true, None::<&str>)?;
             let disconnect_item =
@@ -510,7 +510,7 @@ fn main() {
                 .icon(tray_icon_for("disconnected").expect("embedded tray icon"))
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .tooltip("MotionPro — 未连接")
+                .tooltip("VibeMotionPro — 未连接")
                 .build(&handle)?;
 
             tray.on_menu_event(|app, event| match event.id().as_ref() {

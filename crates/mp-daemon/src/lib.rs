@@ -245,7 +245,7 @@ fn identity_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| {
             dirs::config_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("MotionPro")
+                .join(mp_core::APP_ID)
                 .join("device-identity")
         })
 }

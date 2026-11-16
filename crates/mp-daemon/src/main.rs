@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let profiles_path = std::env::var("MP_PROFILES").unwrap_or_else(|_| {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("MotionPro")
+            .join(mp_core::APP_ID)
             .join("profiles.toml")
             .display()
             .to_string()
@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
 /// main 循环与各连接任务都会推进。
 
 /// 冻结自检线程：独立 std 线程（不依赖 tokio）。15s 无心跳 →
-/// 1) 用 cdb 抓全线程栈到 %TEMP%/opencode/freeze_auto.txt
+/// 1) 用 cdb 抓全线程栈到 %TEMP%/com.alphafoxz.vibemotionpro/freeze_auto.txt
 /// 2) std::process::exit(3)（外部 supervisor/用户重启）
 fn spawn_freeze_watchdog() {
     std::thread::Builder::new()
@@ -127,7 +127,7 @@ fn spawn_freeze_watchdog() {
                 if last_change.elapsed() >= std::time::Duration::from_secs(15) {
                     // 冻结！抓栈（仅本地符号 + 20s 超时，见 dump_all_thread_stacks）
                     // 后自杀
-                    let dir = std::env::temp_dir().join("motionpro");
+                    let dir = std::env::temp_dir().join(mp_core::APP_ID);
                     let _ = std::fs::create_dir_all(&dir);
                     dump_all_thread_stacks(&dir.join("freeze_auto.txt"));
                     let _ = std::fs::write(

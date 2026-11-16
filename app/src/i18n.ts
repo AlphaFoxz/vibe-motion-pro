@@ -3,7 +3,7 @@ export type Lang = "zh-CN" | "en" | "ja";
 
 const dict = {
   "zh-CN": {
-    appTitle: "MotionPro",
+    appTitle: "VibeMotionPro",
     // 状态
     stDisconnected: "未连接",
     stConnecting: "连接中",
@@ -70,7 +70,7 @@ const dict = {
     language: "语言",
   },
   en: {
-    appTitle: "MotionPro",
+    appTitle: "VibeMotionPro",
     stDisconnected: "Disconnected",
     stConnecting: "Connecting",
     stConnected: "Connected",
@@ -128,7 +128,7 @@ const dict = {
     language: "Language",
   },
   ja: {
-    appTitle: "MotionPro",
+    appTitle: "VibeMotionPro",
     stDisconnected: "未接続",
     stConnecting: "接続中",
     stConnected: "接続済み",

@@ -1,4 +1,4 @@
-# MotionPro VPN 客户端重写计划
+# VibeMotionPro（vibe-motion-pro）— MotionPro VPN 客户端重写计划
 
 ## 背景
 
