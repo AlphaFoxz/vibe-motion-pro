@@ -92,8 +92,9 @@
       （4.12MB）构建 → dpkg -i → ldd 无缺库 → WSLg GUI 冒烟（进程存活）→ dpkg -r
       干净卸载；pnpm 12 构建审批（pnpm-workspace.yaml `allowBuilds`，CI 同步升至 12）
 - [ ] Windows：NSIS 或 MSIX；macOS：notarized pkg/dmg（Network Extension/特权 helper）；Linux：deb/rpm/AppImage
-- [ ] daemon 随应用分发（Tauri sidecar externalBin）+ 各平台服务注册
-      （windows-service / launchd / systemd）与卸载清理；wintun.dll 补 arm64 变体
+- [ ] daemon 随应用分发 + 各平台服务注册，与卸载清理 —— **实施计划已定稿：见 `docs/plan-release.md`**
+      （Windows=sidecar UAC 拉起随 UI 存亡 / Linux=deb 内置 systemd unit；macOS launchd 暂缓；
+      红线：不许改已调通的 VPN 核心功能与业务流程）；wintun.dll 补 arm64 变体
 
 ### 阶段5 验证发布
 
