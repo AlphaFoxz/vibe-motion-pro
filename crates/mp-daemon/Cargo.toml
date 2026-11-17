@@ -23,6 +23,16 @@ dirs = { workspace = true }
 hostname = { workspace = true }
 rand = { workspace = true }
 
+# managed 模式（--managed，随 UI sidecar 存亡）所需：
+# OpenProcess/WaitForSingleObject 父进程探活、FreeConsole 脱离提权拉起时的控制台窗口。
+# 版本与 mp-platform 对齐（0.52，lockfile 已有）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+] }
+
 [dev-dependencies]
 rcgen = "0.13"
 tokio-rustls.workspace = true

@@ -14,7 +14,7 @@
 - **Profiles = 服务器**：卡片（名称/host/隧道类型/上次连接/★默认）点击即预选并聚焦动态密保；
   两步删除确认；`autoconnect` 字段用作「默认服务器」。
 - **记住密码**：`keyring` crate 写入 OS 凭据管理器（Windows Credential Manager /
-  macOS Keychain / Linux Secret Service），key = `MotionPro / vpn-pass:<profile_id>`。
+  macOS Keychain / Linux Secret Service），key = `VibeMotionPro / vpn-pass:<profile_id>`。
 - **i18n**：zh-CN / en / ja；语言切换同步托盘菜单文案（`set_tray_texts`）。
 
 ## IPC 模型（对应 main.rs）

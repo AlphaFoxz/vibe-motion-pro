@@ -245,7 +245,7 @@ fn identity_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| {
             dirs::config_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("MotionPro")
+                .join(mp_core::APP_ID)
                 .join("device-identity")
         })
 }
@@ -446,15 +446,25 @@ impl DaemonState {
     /// 异步注销：GET /prx/.../logout（带会话 cookie）。失败只记日志。
     pub fn logout_last_session(&mut self) {
         if let Some((host, cookie)) = self.last_session.take() {
-            tokio::spawn(async move {
-                match mp_core::control::ControlClient::new(&host, 443, true) {
-                    Ok(c) => match c.logout(&cookie).await {
-                        Ok(status) => tracing::info!("logout: {status}"),
-                        Err(e) => tracing::warn!("logout failed: {e}"),
-                    },
-                    Err(e) => tracing::warn!("logout client build failed: {e}"),
-                }
-            });
+            tokio::spawn(Self::do_logout(host, cookie));
+        }
+    }
+
+    /// 同上但**等待完成**：进程退出路径用（spawn 版本会随 runtime drop 被取消，
+    /// 注销请求发不出去就会在网关堆僵尸会话）。
+    pub async fn logout_last_session_await(&mut self) {
+        if let Some((host, cookie)) = self.last_session.take() {
+            Self::do_logout(host, cookie).await;
+        }
+    }
+
+    async fn do_logout(host: String, cookie: String) {
+        match mp_core::control::ControlClient::new(&host, 443, true) {
+            Ok(c) => match c.logout(&cookie).await {
+                Ok(status) => tracing::info!("logout: {status}"),
+                Err(e) => tracing::warn!("logout failed: {e}"),
+            },
+            Err(e) => tracing::warn!("logout client build failed: {e}"),
         }
     }
 

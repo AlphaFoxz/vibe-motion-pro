@@ -2,7 +2,7 @@
 
 use crate::{IpcError, Request, Response};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 pub async fn send<T: Serialize, W: AsyncWrite + Unpin>(msg: &T, w: &mut W) -> Result<(), IpcError> {
     let mut line = serde_json::to_string(msg)?;
@@ -12,11 +12,14 @@ pub async fn send<T: Serialize, W: AsyncWrite + Unpin>(msg: &T, w: &mut W) -> Re
     Ok(())
 }
 
-pub async fn recv<T: for<'de> Deserialize<'de>, R: AsyncRead + Unpin>(
+/// 接收一行 JSON。`R` 必须是**持久** BufReader（跨调用保留缓冲）：
+/// 一次 poll_read 可能带回多行（应答与推送挤在同一 TCP 段），若每次
+/// 调用临时包一层 BufReader，未消费的行会随临时缓冲一起丢失。
+pub async fn recv<T: for<'de> Deserialize<'de>, R: AsyncBufRead + Unpin>(
     r: &mut R,
 ) -> Result<T, IpcError> {
     let mut line = String::new();
-    let n = BufReader::new(r).read_line(&mut line).await?;
+    let n = r.read_line(&mut line).await?;
     if n == 0 {
         return Err(IpcError::Closed);
     }
@@ -89,5 +92,31 @@ mod tests {
         drop(_a);
         let err = recv_request(&mut b).await.unwrap_err();
         assert!(matches!(err, IpcError::Closed));
+    }
+
+    /// 回归：两条消息挤在同一读段（应答 + 推送背靠背写出）时，
+    /// 第二条曾被 recv 内部的临时 BufReader 吞掉。
+    #[tokio::test]
+    async fn two_messages_in_one_segment_are_both_delivered() {
+        let (mut a, mut b) = duplex_pair().await;
+
+        let first = serde_json::to_string(&Response::Ok).unwrap();
+        let second = serde_json::to_string(&Response::Status {
+            status: StatusSnapshot::disconnected(),
+        })
+        .unwrap();
+        // 单次写出：接收端一次 poll_read 拿到两行
+        a.write_all(format!("{first}\n{second}\n").as_bytes())
+            .await
+            .unwrap();
+        a.flush().await.unwrap();
+
+        assert_eq!(recv_response(&mut b).await.unwrap(), Response::Ok);
+        assert_eq!(
+            recv_response(&mut b).await.unwrap(),
+            Response::Status {
+                status: StatusSnapshot::disconnected()
+            }
+        );
     }
 }

@@ -65,7 +65,7 @@ pub mod imp {
             // DLL 搜索路径含 exe 目录（build.rs 已拷贝）
             let wintun = unsafe { wintun::load() }
                 .map_err(|e| PlatformError::Adapter(format!("wintun load: {e}")))?;
-            let adapter = wintun::Adapter::create(&wintun, &cfg.name, "MotionPro", None)
+            let adapter = wintun::Adapter::create(&wintun, &cfg.name, "VibeMotionPro", None)
                 .map_err(|e| PlatformError::Adapter(format!("adapter create: {e}")))?;
             adapter
                 .set_network_addresses_tuple(

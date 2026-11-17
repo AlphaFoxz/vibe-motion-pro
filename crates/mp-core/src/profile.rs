@@ -107,7 +107,7 @@ impl ProfileStore {
 
     fn save(&self) -> Result<(), ProfileError> {
         let Some(path) = &self.path else { return Ok(()) };
-        let mut s = String::from("# MotionPro profiles\n");
+        let mut s = format!("# {} profiles\n", crate::APP_NAME);
         for p in self.profiles.values() {
             let body = toml::to_string(p).map_err(|e| ProfileError::Toml(e.to_string()))?;
             s.push_str(&format!("\n[[profile]]\n{body}"));

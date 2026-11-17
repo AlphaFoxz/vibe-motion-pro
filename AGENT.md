@@ -1,6 +1,6 @@
 # AGENT.md — AI 自迭代说明
 
-本项目（MotionPro VPN 跨平台重写）是一个**以 AI 自主迭代为主要开发方式**的仓库。
+本项目（**vibe-motion-pro**，产品名 VibeMotionPro：MotionPro VPN 跨平台重写）是一个**以 AI 自主迭代为主要开发方式**的仓库。
 任何 AI agent（或人类协作者）接手时，请遵循以下宽松约定，积极、大胆地维护仓库。
 
 ## 核心原则
@@ -14,6 +14,23 @@
 
 - 主线是 **Rust 核心 + Tauri 2 UI**，但这不是教条。若某部分用其他方案明显更优（如某平台组件用 C、协议分析脚本用 Node），直接采用并在相关文档记录一句理由即可。
 - 架构对齐原版运行时行为（见 `docs/runtime-forensics.md`），优先级高于任何事先设计。
+
+## 命名规范（发布身份，以 GitHub 仓库名 vibe-motion-pro 为准）
+
+| 用途 | 值 | 来源/说明 |
+|---|---|---|
+| 仓库/包名 | `vibe-motion-pro` | GitHub 仓库名，本地目录名可以不同 |
+| 用户可见产品名 | `VibeMotionPro` | `mp_core::APP_NAME`；无空格（安装包/安装目录/快捷方式路径免转义） |
+| 应用标识 | `com.alphafoxz.vibemotionpro` | `mp_core::APP_ID` = tauri.conf.json identifier；无连字符（注册表/DBus 兼容）；**发布后不可改** |
+| 配置/数据根目录 | `<config_dir>/com.alphafoxz.vibemotionpro/` | UI（Tauri 自动派生）与 daemon（显式 join APP_ID）同根 |
+| 临时目录 | `<temp>/com.alphafoxz.vibemotionpro/` | 崩溃栈、协议帧 dump |
+| 凭据服务名 | `VibeMotionPro`，key `vpn-pass:<profile_id>` | OS 凭据管理器/Keychain/Secret Service |
+| 内部 crate/二进制 | `mp-core` / `mp-daemon` / `mp-platform` / `mp-ipc` / `mp-app` | 内部命名，不发布 crates.io，无需跟随产品改名 |
+
+**刻意保留 `MotionPro` 字样的位置**（协议兼容/取证记录，不要“顺手”改名）：
+- 注册表 `HKCU\Software\MotionPro\L3VPN`（读取原版客户端设备身份，服务器侧已绑定该 HWID）
+- 门户 URL `/prx/000/http/localhost:65200/motionpro/postlogin/apps`（服务器契约）
+- `docs/protocol-clues.md`、`docs/runtime-forensics.md`、`docs/ghidra-tasks.md` 等（描述对象是原版二进制）
 
 ## 文档结构（自由增删）
 

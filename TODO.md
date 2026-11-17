@@ -1,4 +1,4 @@
-# MotionPro VPN 客户端重写计划
+# VibeMotionPro（vibe-motion-pro）— MotionPro VPN 客户端重写计划
 
 ## 背景
 
@@ -92,8 +92,11 @@
       （4.12MB）构建 → dpkg -i → ldd 无缺库 → WSLg GUI 冒烟（进程存活）→ dpkg -r
       干净卸载；pnpm 12 构建审批（pnpm-workspace.yaml `allowBuilds`，CI 同步升至 12）
 - [ ] Windows：NSIS 或 MSIX；macOS：notarized pkg/dmg（Network Extension/特权 helper）；Linux：deb/rpm/AppImage
-- [ ] daemon 随应用分发（Tauri sidecar externalBin）+ 各平台服务注册
-      （windows-service / launchd / systemd）与卸载清理；wintun.dll 补 arm64 变体
+- [x] daemon 随应用分发 + 各平台服务注册，与卸载清理 —— **已完成（2026-11-17，见 `docs/plan-release.md`）**：
+      Windows=NSIS 内置 sidecar（UAC 提权拉起，随 UI 存亡）+ Linux=deb 注入 systemd unit
+      （dpkg-deb 后处理，WSL 真机全链路验证：安装/服务/IPC/重启自启/干净卸载）；
+      macOS launchd 暂缓；UAC 真机端到端与首次 tag 发布留人工验收项
+- [ ] wintun.dll 补 arm64 变体
 
 ### 阶段5 验证发布
 
