@@ -32,11 +32,14 @@ scripts/       抓包解析、图标生成、Linux/musl 测试与 WSL 冒烟等�
 ## 现状
 
 - [x] 阶段0：原版资产收集 + 静态/动态取证（协议时间线、状态枚举、心跳频率实测）
-- [x] 阶段1：monorepo 骨架，33 个测试全绿（Windows MSVC）
-- [x] 阶段2：IPC / 状态机 / 重连退避 / 隧道帧编解码 / smoltcp 数据面骨架
-- [x] 阶段3（部分）：Tauri UI 骨架 + 托盘 + IPC 桥接
-- [ ] 协议帧格式逆向（Ghidra 深度分析 vl3vpn.dll，样本在内部存储 reference/）
-- [ ] UI 功能对齐、安装分发、验证发布
+- [x] 阶段1：monorepo 骨架（Windows MSVC / WSL Ubuntu musl 双平台测试全绿）
+- [x] 阶段2：协议帧格式逆向（Ghidra T1-T7 全部完成）→ 控制通道（rustls TLS + AAA 登录）与
+      数据面（/vpntunnel 握手 + 配置帧 + 转发泵 + keepalive）均已实现并真机调通；
+      tun 数据面 + 路由/DNS 接管（NetBackend 三平台策略）
+- [x] 阶段3：Tauri UI 双视图重构 + 托盘 + 单连接多路复用 IPC + keychain 记住密码 + i18n
+- [x] 阶段4（部分）：三平台打包 CI、Linux deb 真机验证、daemon 随应用分发
+      （win=NSIS sidecar UAC / linux=systemd unit，见 docs/plan-release.md）
+- [ ] 与原版对拍验证、功能清单逐项对齐、macOS 分发、验证发布
 
 详见 [TODO.md](TODO.md)。
 
@@ -55,9 +58,13 @@ pnpm tauri dev                # UI 开发
 | 文档 | 内容 |
 |---|---|
 | [TODO.md](TODO.md) | 总待办 |
+| [AGENT.md](AGENT.md) | AI 自迭代协作约定 |
 | [docs/protocol-clues.md](docs/protocol-clues.md) | 原版二进制静态分析 |
+| [docs/ghidra-tasks.md](docs/ghidra-tasks.md) | Ghidra 深度反编译任务与结论（T1-T7） |
 | [docs/runtime-forensics.md](docs/runtime-forensics.md) | 原版运行时取证（进程拓扑/协议流/心跳实测） |
 | [docs/feature-list.md](docs/feature-list.md) | 功能基线（8 大类） |
+| [docs/plan-release.md](docs/plan-release.md) | 发布架构实施计划（win sidecar / linux systemd） |
+| [docs/runbook.md](docs/runbook.md) | 真机运行手册（Windows 连通流程与故障排查） |
 
 ## License
 

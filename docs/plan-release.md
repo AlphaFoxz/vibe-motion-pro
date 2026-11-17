@@ -1,6 +1,6 @@
 # plan-release：发布架构（Windows=sidecar 提权拉起 / Linux=systemd 服务）
 
-日期：2026-11-17　状态：**待实施**（供后续 AI agent 按此迭代；对应 TODO 阶段4）
+日期：2026-11-17　状态：**P0-P3 已完成**（Windows UAC 真机端到端与首次 tag 发布留人工验收；macOS launchd 暂缓）
 
 ## 背景与决策
 
