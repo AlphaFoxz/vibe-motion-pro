@@ -22,3 +22,13 @@ keyring = { version = "3", default-features = false, features = [
     "sync-secret-service",
 ] }
 mp-ipc = { workspace = true }
+
+# Windows：ShellExecuteW runas 提权拉起 daemon sidecar（UAC）。
+# 版本与 mp-platform/mp-daemon 对齐（0.52）；该 API 的 feature 门：
+# Win32_Foundation + Win32_UI_WindowsAndMessaging（参数/返回类型所在模块）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_UI_Shell",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

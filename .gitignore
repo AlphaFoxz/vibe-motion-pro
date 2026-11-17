@@ -3,6 +3,8 @@
 app/node_modules
 app/dist
 app/src-tauri/target
+# tauri bundle 资源源目录（发布前由 scripts/prepare-sidecar 脚本填充）
+app/src-tauri/sidecar
 *.log
 # 敏感与临时产物
 reference/config/server.p12

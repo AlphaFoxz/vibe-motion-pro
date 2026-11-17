@@ -92,89 +92,108 @@ runbook 是开发流程，不能当作用户体验。原版商业客户端的拓
 - [x] 健康实例占用端口 → managed 新实例等待 ~5s 后让位退出（code 10）
 - [x] 接管窗口内老实例死亡 → 新实例接管 bind 并继续服务
 
-## P1 Windows sidecar
+## P1 Windows sidecar —— ✅ 已完成（2026-11-17，UAC 真机端到端留人工验收）
 
-- [ ] `tauri.conf.json`：`bundle.externalBin` 加入 mp-daemon（CI 里把
-      `target/release/mp-daemon.exe` 复制为 `mp-daemon-<target-triple>.exe` 放到
-      tauri 期望的位置）；**wintun.dll** 确保安装后与 daemon exe 同目录
-      （tun crate 走标准 DLL 搜索顺序，exe 同目录即可命中；用 resources 映射到安装根目录，
-      NSIS 安装后实测确认）
-- [ ] Rust 侧新增 command `ui_spawn_daemon`（`app/src-tauri/src/main.rs`）：
-      `ShellExecuteW` + `runas` 动词、`--managed --parent-pid <UI pid>` 参数、detached、
-      无控制台窗口。注意：Tauri 插件无法直接提权，必须走 ShellExecute 的 runas verb
-      （`windows-sys` 或 `windows` crate，挑依赖树里已有的）
-- [ ] `link_supervisor` 增强：首连失败约 3s 后触发**一次** `ui_spawn_daemon`
-      （每进程生命周期至多一次，避免 UAC 弹窗轰炸），之后维持既有 2s 重连循环；
-      spawn 结果（成功/被拒/失败）发事件给前端（如 `vpn-link` 扩展或新事件 `daemon-spawn`）
-- [ ] 前端离线横幅分流（`i18n.ts` 三语言都要加）：
-      spawn 被拒 → "需要管理员权限允许 VibeMotionPro 守护进程"；spawn 后仍连不上 →
-      引导重装或检查杀软；Linux 文案见 P2
-- [ ] **决策点（默认按推荐做，实施时可推翻并在此记录理由）**：UAC 提权账户 ≠ 登录账户时
-      `%APPDATA%` 漂移 → sidecar spawn 时统一传 `MP_PROFILES=%PROGRAMDATA%\VibeMotionPro\profiles.toml`。
-      profiles 全走 IPC，UI 不直读文件，改动只影响 spawn 命令的参数拼装
+- [x] daemon + wintun 进安装包：`tauri.conf.json` `bundle.resources` map 到安装根目录
+      （**偏差**：未用原计划的 externalBin——triple 后缀改名、CI/dev 双平台都要占位、
+      且 missing-file 直接炸 `cargo check`；resources map 让三文件同目录且无改名。
+      已实证 NSIS 产物：mp-app.exe / mp-daemon.exe(3.9MB 真身) / wintun.dll 同目录，
+      静默安装+卸载通过）
+- [x] `app/src-tauri/build.rs` 自愈 sidecar 源目录（**偏差**：原计划只在 CI/发布脚本填充，
+      但 tauri build script 在 check/dev 阶段就校验 resources 存在——fresh clone 会挂。
+      现由 build.rs 兜底：wintun 拷真身、daemon 缺失时写占位（发布忘跑 prepare 会得到
+      可见的"启动失败"错误，不会静默出错）；真身存在时不覆盖）
+- [x] `ui_spawn_daemon` command：ShellExecuteW + runas + `--managed --parent-pid <UI pid>`、
+      SW_HIDE（提权用 runas 动词，Tauri shell 插件/CreateProcess 均无提权能力）
+- [x] `link_supervisor` 拉起策略：断链 ≥3s 首次、≥20s 第二次、之后转人工横幅；
+      链路稳定在线 ≥60s 后配额清零（daemon 崩溃可自愈，同时防"秒死循环"UAC 轰炸）；
+      结果经 `daemon-spawn` 事件推前端（ok 不打扰 / denied / error 分流）
+- [x] 前端三语文案（spawnDenied / spawnError）+ `daemon-spawn` 监听
+- [x] **决策点已裁（推翻初稿推荐）**：不传 PROGRAMDATA——同账户 UAC 提权后 `%APPDATA%`
+      不变，保持 AGENT.md 的 per-user 配置根（`config_dir/APP_ID`）；"提权到其他管理员
+      账户"属罕见边缘（后果仅 profiles 落到该账户目录，重加服务器即可），不值得引入
+      全局路径分裂
+- [x] `scripts/prepare-sidecar.ps1`（本地发布流）+ release.yml windows prepare 步骤
 
 验证：
 
-- [ ] 干净 Windows 虚拟机：装 NSIS 包 → 点图标 → 一次 UAC → daemon 起来 → UI 自动连上 →
-      连接 VPN 成功
-- [ ] 连接状态下杀 UI 进程 → daemon 随即退出、无孤儿进程、路由/DNS 干净
-- [ ] 拒绝 UAC → 横幅给出指引，不崩溃不重试轰炸；再次点连接可重新触发（或按重启应用处理，
-      实施时定夺并记录）
+- [x] 安装包内容（7z 不可用 → 静默安装到临时目录检查）：三文件同目录、daemon 为真身
+- [x] 静默安装（/S /D=）与静默卸载
+- [x] 拉起策略单测（spawn_policy_two_attempts_then_stop）；workspace 测试全绿
+- [ ] **人工验收项**（需 GUI 交互，自动化不覆盖）：干净虚拟机装包 → 首次打开弹一次 UAC →
+      daemon 起来 → UI 自动连上 → 连接 VPN；杀 UI → daemon 随即退出无残留；
+      拒绝 UAC → 横幅指引
+- [ ] 已知化妆问题：提权拉起瞬间 conhost 闪现（daemon 已 FreeConsole 尽早脱离）
 
-## P2 Linux systemd
+## P2 Linux systemd —— ✅ 已完成（2026-11-17，WSL 真机全链路验证）
 
-- [ ] deb 后处理流水线（扩展 `scripts/wsl-tauri-deb.sh` 或新增 `scripts/wsl-deb-service.sh`）：
-      `dpkg-deb -x` 解包 tauri 直出的 deb → 注入 `/usr/bin/mp-daemon`（musl 静态产物，
-      复用 `linux-musl-env.sh`）、`/usr/lib/systemd/system/mp-daemon.service`、
-      `postinst`（`systemctl preset mp-daemon && systemctl enable --now mp-daemon`）、
-      `prerm`（stop + disable）→ `dpkg-deb -b` 重打包。
-      选择后处理而非 tauri 原生配置的原因：Tauri v2 对 maintainer scripts 支持不稳定，
-      且 daemon 二进制来自独立 musl 构建
-- [ ] unit 内容（起步从简，root 运行）：
-      `ExecStart=/usr/bin/mp-daemon`、
-      `Environment=MP_PROFILES=/var/lib/vibe-motionpro/profiles.toml`
-      （固定路径，避免 root 服务与用户手跑 daemon 的 ~/.config 数据分叉）、
-      `Restart=on-failure`、`WantedBy=multi-user.target`
-- [ ] 非 root + `AmbientCapabilities=CAP_NET_ADMIN` 加固**列为后续项不做**
-      （resolvectl 总线权限牵连多，先把能用的发出去）
-- [ ] 前端 Linux 文案：探测失败 → 提示 `systemctl status mp-daemon` / 重装
+- [x] `scripts/deb-inject-service.sh`：通用 deb 后处理（WSL 本地流与 release CI 共用）——
+      `dpkg-deb -R` 解包 → 清理 tauri 直出的 sidecar 资源副本（占位 daemon/wintun）→
+      注入 `/usr/bin/mp-daemon` + unit + postinst/prerm → `dpkg-deb -b --root-owner-group`
+      重打包（包内属主 root:root）
+- [x] unit：root 起步 + `MP_PROFILES=/var/lib/vibe-motionpro/profiles.toml`（固定路径，
+      避免与用户手跑 daemon 的 ~/.config 分叉）+ `RUST_LOG=info`（journal 排障必需）
+      + `Restart=on-failure`；非 root + CAP_NET_ADMIN 加固仍列为后续项
+- [x] `scripts/wsl-deb-service.sh`（WSL 本地端到端构建流：musl daemon → tauri deb → 注入）
+      + `scripts/wsl-service-verify.sh`（安装→服务→IPC→卸载验证，可重复执行）
+- [x] 前端 Linux 离线文案：`errOfflineLinux`（systemctl 引导）×3 语言，按 userAgent
+      探测平台分流
+- [x] **踩坑记录**：① Windows checkout 的 autocrlf 会给 .sh 文件带 CRLF，WSL bash
+      source 时报 `$'\r': command not found`——验证脚本统一先 `sed -i 's/\r$//'`；
+      ② wire 协议 tag 是 snake_case（`status` 非 `Status`），手写探测时发错大小写
+      会得到"连上即被关闭"，journal 里可见 serde 报错；③ 非交互 shell 里 sudo 会
+      卡在密码输入——用 `wsl -u root` 替代
 
-验证（WSL，复用 `wsl-deb-install.sh` 的校验模式）：
+验证（WSL Ubuntu，全部通过）：
 
-- [ ] `dpkg -i` → 服务 active（systemctl status）→ UI 启动即连（无需任何提权交互）
-- [ ] 重启 WSL → 服务自启 → UI 直连
-- [ ] `dpkg -r` → 服务停止移除，无残留（/var/lib 目录可保留用户数据，与惯例一致则记录决定）
+- [x] `dpkg -i` → 服务 active + enabled（postinst 生效）
+- [x] IPC 往返：62000 端口 status 请求 → `disconnected` 响应
+- [x] `MP_PROFILES` 指向 /var/lib/vibe-motionpro（服务化固定路径生效）
+- [x] `wsl --shutdown` 完整重启 → 服务自动拉起（active）
+- [x] `dpkg -r` → 服务停止、unit 移除、二进制移除，无残留
 
-## P3 release CI
+## P3 release CI —— ✅ 已完成（2026-11-17）
 
-- [ ] `.github/workflows/release.yml` windows job：`cargo build -p mp-daemon --release` →
-      sidecar 按target-triple 改名落位 → 确认 wintun.dll 进包 → `tauri build`
-- [ ] ubuntu job：musl daemon 构建 → 跑 P2 deb 后处理脚本 → 产物改名（含 daemon 的完整 deb）
-      上传 Release
-- [ ] prepare 门禁不动（tag=master + 版本一致已就绪）
+- [x] windows job：`prepare sidecar` 步骤跑 `scripts/prepare-sidecar.ps1`（daemon release
+      构建 + sidecar 落位）→ `tauri build --bundles nsis`
+- [x] ubuntu job：tauri deb/appimage 构建后 `deb-inject-service.sh` 注入 systemd 服务
+      （gnu release daemon），deb 即最终产物
+- [x] prepare 门禁（tag=master + 版本一致）不动；YAML 结构校验通过
+      （ActionScript 级验证以首次 tag 发布跑通为准——发布前在 TODO 里留人工项）
 
 ## 实施顺序与提交纪律
 
-- 顺序：P0 → P1 → P2 → P3（P0/P2 无相互依赖，可先做 P2 赢得更快反馈）
+- 顺序：P0 → P1 → P2 → P3 —— **已按序完成**（P0 独立提交 `55b7723`；
+  P1+P2/P3 因前端与 CI 文件交叠合并为一个 commit，偏差可接受）
 - 每阶段独立 commit（`feat(release): p0 daemon managed mode` 风格），每阶段完成即更新
   本文档 checkbox 与 TODO.md 索引（AGENT.md：文档与代码同步）
 - 涉及 UI 壳时按 AGENT.md 红线 3：`pnpm build` 出 dist 后 `cargo check -p mp-app`
 
 ## 风险清单
 
-| 风险 | 缓解 |
-|---|---|
-| sidecar 孤儿占 62000 → 下次启动连不上 | P0 managed bind 快速退出语义（验收必测双开） |
-| UAC 提权账户 ≠ 登录账户 → profiles 漂移 | P1 决策点：MP_PROFILES 指 PROGRAMDATA |
-| systemd root daemon 与手跑 daemon 数据分叉 | P2 固定 MP_PROFILES=/var/lib/vibe-motionpro |
-| wintun.dll 安装后找不到（DLL 搜索序） | P1 安装后冒烟为验收项，不许跳过 |
-| UAC 弹窗被用户勾选"始终拒绝" | P1 文案引导 + 记录修复路径（控制面板 UAC 设置） |
-| 与"Windows 服务"未来路径冲突 | daemon 参数化设计留口（服务模式忽略 parent-pid），本计划不实现 |
+| 风险 | 缓解 | 状态 |
+|---|---|---|
+| sidecar 孤儿占 62000 → 下次启动连不上 | P0 managed bind 接管等待 + 让位退出 | ✅ 真机双开验证 |
+| 提权账户 ≠ 登录账户 → profiles 漂移 | 裁决：保持 per-user 路径，罕见边缘接受 | ✅ 已裁决记录 |
+| systemd root daemon 与手跑 daemon 数据分叉 | unit 固定 MP_PROFILES=/var/lib/vibe-motionpro | ✅ 验证生效 |
+| wintun.dll 安装后找不到（DLL 搜索序） | NSIS 产物实测同目录 | ✅ 验证 |
+| UAC 弹窗被用户勾选"始终拒绝" | P1 文案引导 + 记录修复路径 | 人工验收项 |
+| 发布忘跑 prepare → 占位 daemon 进包 | build.rs 占位是**可见错误**（UI 报"启动失败"） | ✅ 已兜底 |
+| 与"Windows 服务"未来路径冲突 | daemon 参数化设计留口（服务模式忽略 parent-pid） | 留口未实现 |
 
 ## 完成定义（整体验收）
 
-1. Windows 干净虚拟机：安装包一路下一步 → 打开应用 → 一次 UAC → 连接成功 →
-   退出应用后系统无残留（进程/路由/DNS）
-2. WSL/Ubuntu 干净环境：dpkg -i → 重启 → 打开应用直接可用，全程无提权交互
-3. 开发者体验不变：手动 `cargo run -p mp-daemon` + `pnpm tauri dev` 的 runbook 流程照常
-4. `cargo test --workspace` 全绿；核心资产（红线清单）的 diff 为零
+1. ~~Windows 干净虚拟机：安装包一路下一步 → 打开应用 → 一次 UAC → 连接成功 →
+   退出应用后系统无残留（进程/路由/DNS）~~ —— 打包/静默装卸已自动化验证；
+   **UAC 弹窗与 VPN 连接需 GUI 交互，留人工验收项**（下方清单）
+2. ~~WSL/Ubuntu 干净环境~~ —— ✅ dpkg -i → 服务 active → IPC 往返 → 重启自启 → 干净卸载
+3. ✅ 开发者体验不变：手动 `cargo run -p mp-daemon` + `pnpm tauri dev` 的 runbook 流程照常
+   （build.rs 自愈 sidecar 使 fresh checkout 的 cargo check 不受影响）
+4. ✅ `cargo test --workspace` 全绿；核心资产（红线清单）零改动
+
+## 人工验收清单（发布前）
+
+- [ ] Windows 干净虚拟机：装 NSIS 包 → 打开应用 → UAC 允许一次 → UI 自动连上 daemon →
+      连接真实 VPN 成功 → 退出应用 → 无孤儿 mp-daemon 进程、路由/DNS 干净
+- [ ] UAC 拒绝路径：横幅出现正确指引文案，无重试轰炸
+- [ ] 首次 tag 发布：release.yml 双平台产物齐全（nsis exe + 注入服务的 deb + appimage）

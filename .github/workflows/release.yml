@@ -60,6 +60,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # tauri.conf.json 的 bundle.resources 引用 app/src-tauri/sidecar/——
+      # Windows：daemon 提权拉起随 UI 存亡（plan-release.md P1）；wintun.dll 同目录
+      - name: prepare sidecar (windows)
+        if: runner.os == 'Windows'
+        run: pwsh ./scripts/prepare-sidecar.ps1
       - name: bundle (windows)
         if: runner.os == 'Windows'
         working-directory: app
@@ -72,6 +77,16 @@ jobs:
         run: |
           pnpm install --registry=https://registry.npmjs.org
           pnpm tauri build --bundles deb,appimage
+      # daemon 以 systemd 服务注入 deb（plan-release.md P2）；tauri 直出的
+      # sidecar 资源副本（占位 daemon/wintun）由注入脚本清理
+      - name: inject systemd service into deb (linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p mp-daemon --release
+          for deb in target/release/bundle/deb/*.deb; do
+            bash scripts/deb-inject-service.sh "$deb" target/release/mp-daemon
+          done
+          ls -la target/release/bundle/deb/
       # macOS 暂缓（当前只发 win/linux）。恢复时矩阵加回 macos-latest，
       # 补 bundle (macos) 步骤（参见 ci.yml 注释），并在 artifact path 加 dmg/*.dmg。
       - name: upload artifacts

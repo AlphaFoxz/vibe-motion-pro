@@ -26,6 +26,9 @@ type Profile = {
 
 const $ = (id: string) => document.getElementById(id)!;
 
+// Linux 上 daemon 由 systemd 服务承担（plan-release.md P2），离线提示走服务引导文案
+const isLinux = navigator.userAgent.includes("Linux");
+
 // ---------- 全局状态 ----------
 
 let lang: Lang = detectLang();
@@ -99,7 +102,7 @@ function renderStatic() {
     "btn-editor-cancel": d.cancel,
     "tab-connect-label": d.tabConnect,
     "tab-servers-label": d.tabServers,
-    "offline-banner": d.errOffline,
+    "offline-banner": isLinux ? d.errOfflineLinux : d.errOffline,
   };
   for (const [id, text] of Object.entries(map)) {
     const el = $(id);
@@ -569,6 +572,15 @@ window.addEventListener("DOMContentLoaded", () => {
   // 事件桥（Rust 长连接推送）
   void listen<StatusSnapshot>("vpn-status", (ev) => { connectingLocal = false; applyStatus(ev.payload); });
   void listen<boolean>("vpn-link", (ev) => setOffline(!ev.payload));
+  // daemon 自动拉起结果：ok 不打扰（连接随后自动恢复）；被拒/失败给出指引
+  void listen<{ kind: string; detail?: string }>("daemon-spawn", (ev) => {
+    const d = t(lang);
+    if (ev.payload.kind === "denied") {
+      showError(d.spawnDenied);
+    } else if (ev.payload.kind === "error") {
+      showError(ev.payload.detail ? `${d.spawnError}：${ev.payload.detail}` : d.spawnError);
+    }
+  });
   void listen("tray-connect", () => {
     switchTab("connect");
     const def = profiles.find((p) => p.autoconnect) ?? profiles[0];

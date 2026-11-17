@@ -202,13 +202,125 @@ fn handle_status(app: &AppHandle, snap: StatusSnapshot) {
 
 // ---------- 链路维护 ----------
 
+/// 断链多久后首次自动拉起 daemon（给"daemon 还没起"一点余量，也避免
+/// 应用启动瞬间的抖动直接触发 UAC）。
+const SPAWN_AFTER: Duration = Duration::from_secs(3);
+/// 首次拉起未果后，第二次（最后一次）拉起的等待时长。
+const SPAWN_RETRY_AFTER: Duration = Duration::from_secs(20);
+/// 链路稳定在线多久后，重新获得自动拉起配额（防 daemon「秒死循环」
+/// 反复触发 UAC 轰炸；正常崩溃自愈不受影响）。
+const LINK_STABLE: Duration = Duration::from_secs(60);
+
+/// 是否应该自动拉起 daemon（纯函数便于单测）。`attempts` 为本次断链
+/// 已拉起次数（链路稳定在线 ≥ LINK_STABLE 后由调用方清零）。
+fn should_spawn_daemon(link_down: Option<Duration>, attempts: u32) -> bool {
+    let Some(down) = link_down else { return false };
+    match attempts {
+        0 => down >= SPAWN_AFTER,
+        1 => down >= SPAWN_RETRY_AFTER,
+        _ => false,
+    }
+}
+
+/// 拉起结果（`daemon-spawn` 事件载荷，前端据此分流提示文案）。
+/// Ok/Denied 仅在 Windows 构造（非 Windows 不走 sidecar）。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+#[allow(dead_code)]
+enum SpawnOutcome {
+    /// ShellExecuteW 成功（连接随后自动恢复，不打扰用户）。
+    Ok,
+    /// UAC 被拒绝（SE_ERR_ACCESSDENIED）。
+    Denied,
+    /// 其他失败：sidecar 缺失 / 路径无法定位 / ShellExecute 错误。
+    Error { detail: String },
+}
+
+/// 以管理员权限（UAC）拉起 daemon sidecar：`runas` + `--managed --parent-pid <UI>`。
+/// daemon 生命周期随本进程（见 mp-daemon managed 模式）。
+/// 提权用 ShellExecuteW 的 runas 动词——Tauri shell 插件与 CreateProcess 均无法提权。
+#[tauri::command]
+fn ui_spawn_daemon() -> SpawnOutcome {
+    #[cfg(windows)]
+    {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let Some(dir) = exe_dir else {
+            return SpawnOutcome::Error {
+                detail: "无法定位应用目录".into(),
+            };
+        };
+        let daemon = dir.join("mp-daemon.exe");
+        if !daemon.exists() {
+            // 开发模式（tauri dev 不拷贝 bundle resources）：走 runbook 手动起 daemon
+            return SpawnOutcome::Error {
+                detail: format!("未找到守护进程二进制（{}）", daemon.display()),
+            };
+        }
+        let params = format!("--managed --parent-pid {}", std::process::id());
+        let to_wide = |s: &str| {
+            let mut v: Vec<u16> = s.encode_utf16().collect();
+            v.push(0);
+            v
+        };
+        let verb = to_wide("runas");
+        let file = to_wide(&daemon.display().to_string());
+        let args = to_wide(&params);
+        let dir_w = to_wide(&dir.display().to_string());
+        // SW_HIDE = 0（daemon 侧另有 FreeConsole 兜底）；HWND null = 0（0.52 句柄为 isize）
+        let code = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                0,
+                verb.as_ptr(),
+                file.as_ptr(),
+                args.as_ptr(),
+                dir_w.as_ptr(),
+                0,
+            )
+        };
+        // 返回值 > 32 为成功；SE_ERR_ACCESSDENIED(5) = UAC 被拒
+        if code as isize > 32 {
+            tracing::info!("daemon sidecar spawned (runas)");
+            SpawnOutcome::Ok
+        } else if code as isize == 5 {
+            tracing::warn!("daemon sidecar spawn: UAC denied");
+            SpawnOutcome::Denied
+        } else {
+            SpawnOutcome::Error {
+                detail: format!("ShellExecuteW code {code}"),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // Linux 由 systemd 服务承担 daemon 生命周期（plan-release.md P2），不走 sidecar
+        SpawnOutcome::Error {
+            detail: "仅 Windows 支持自动拉起".into(),
+        }
+    }
+}
+
 /// 常驻任务：维持与 daemon 的单条长连接（断线 2s 退避重连）。
+/// 断链持续时按 should_spawn_daemon 策略自动拉起 daemon（仅 Windows），
+/// 结果经 `daemon-spawn` 事件推给前端分流提示。
 /// 建链后发一次 Status 握手（daemon 广播仅在变化时推送，需主动取初值）。
 async fn link_supervisor(app: AppHandle) {
+    let mut down_since: Option<std::time::Instant> = None;
+    let mut spawn_attempts: u32 = 0;
+    let mut up_since: Option<std::time::Instant> = None;
     loop {
         match tcp_connect(&daemon_addr()).await {
             Err(e) => {
                 tracing::debug!(error = %e, "daemon link not available");
+                let down = down_since
+                    .get_or_insert_with(std::time::Instant::now)
+                    .elapsed();
+                if should_spawn_daemon(Some(down), spawn_attempts) {
+                    spawn_attempts += 1;
+                    let outcome = ui_spawn_daemon();
+                    let _ = app.emit("daemon-spawn", &outcome);
+                }
                 tokio::time::sleep(Duration::from_millis(2000)).await;
             }
             Ok(stream) => {
@@ -233,6 +345,14 @@ async fn link_supervisor(app: AppHandle) {
 
                 let reader = tokio::spawn(reader_loop(rd, shared.clone(), app.clone()));
                 let _ = reader.await;
+                // 链路断开：稳定在线过则重置拉起配额（下次 daemon 崩溃仍可自动恢复）
+                if let Some(t) = up_since {
+                    if t.elapsed() >= LINK_STABLE {
+                        spawn_attempts = 0;
+                    }
+                }
+                up_since = None;
+                down_since = Some(std::time::Instant::now());
                 tokio::time::sleep(Duration::from_millis(1500)).await;
             }
         }
@@ -508,7 +628,8 @@ fn main() {
             password_delete,
             set_autohide,
             ui_hide_window,
-            set_tray_texts
+            set_tray_texts,
+            ui_spawn_daemon
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -737,5 +858,16 @@ mod tests {
                 .unwrap();
             assert!(matches!(resp, Response::Status { .. }), "unexpected: {resp:?}");
         }
+    }
+
+    /// 断链拉起策略：3s 首次 / 20s 第二次 / 之后转人工；未断链不拉起。
+    #[test]
+    fn spawn_policy_two_attempts_then_stop() {
+        assert!(!should_spawn_daemon(None, 0), "链路正常时不拉起");
+        assert!(!should_spawn_daemon(Some(Duration::from_secs(1)), 0), "断链未满 3s");
+        assert!(should_spawn_daemon(Some(SPAWN_AFTER), 0), "断链 ≥3s 首次拉起");
+        assert!(!should_spawn_daemon(Some(Duration::from_secs(10)), 1), "首次未果未满 20s");
+        assert!(should_spawn_daemon(Some(SPAWN_RETRY_AFTER), 1), "二次拉起");
+        assert!(!should_spawn_daemon(Some(Duration::from_secs(300)), 2), "配额用尽转人工");
     }
 }
