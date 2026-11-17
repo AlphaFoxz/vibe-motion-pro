@@ -66,7 +66,9 @@ impl LinkShared {
                 return Err(format!("发送失败：{e}"));
             }
         }
-        match tokio::time::timeout(Duration::from_secs(90), rx).await {
+        // daemon 侧 Connect 有 120s 总超时兜底；这里必须等得更久，
+        // 否则慢登录实际成功、UI 却提前报错，连接成功后的逻辑被跳过。
+        match tokio::time::timeout(Duration::from_secs(125), rx).await {
             Ok(Ok(res)) => res,
             Ok(Err(_)) => Err("与守护进程的连接已断开".into()),
             Err(_) => Err("守护进程响应超时".into()),
@@ -219,7 +221,9 @@ async fn link_supervisor(app: AppHandle) {
                 let _ = app.emit("vpn-link", true);
                 tracing::info!("daemon link established");
 
-                // 握手：查询当前状态（响应走 reader 的推送分支，不入 pending 队列）
+                // 握手：查询当前状态。此刻 pending 为空，应答在 reader 里
+                // 走"无在途请求的 Status"分支按推送处理（若前端恰好抢先
+                // 发出了 Status 请求，则由它拿到同一份数据，二者等价）。
                 {
                     let mut g = shared.write.lock().await;
                     if let Some(w) = g.as_mut() {
@@ -235,22 +239,41 @@ async fn link_supervisor(app: AppHandle) {
     }
 }
 
-/// 读循环：Status/StatusUpdate → 事件；其余响应 → FIFO 交给在途请求。
+/// 读循环：StatusUpdate 推送 → 事件；其余响应 → FIFO 交给在途请求。
+/// 注意 `Response::Status` 有两种来源：Status/Connect/Stop 请求的**应答**
+/// （必须归还挂起槽，否则前端 invoke 挂到超时、连接后的保存密码等
+/// 后续逻辑全部被跳过），以及 link_supervisor 建链握手（不入队，此时
+/// 队列为空 → 按推送处理）。
 /// 单任务独占读半边，await 到完成再迭代，无 select 取消风险。
 /// BufReader 在本任务内包装（split 的 ReadHalf 不透传 AsyncBufRead）。
 async fn reader_loop(rd_raw: TcpRd, shared: Arc<LinkShared>, app: AppHandle) {
+    let push_app = app.clone();
+    reader_core(rd_raw, shared, move |status| {
+        handle_status(&push_app, status)
+    })
+    .await;
+    let _ = app.emit("vpn-link", false);
+}
+
+/// reader_loop 的核心（推送回调注入以便测试；AppHandle/Tauri 事件不可在单测构造）。
+async fn reader_core<F: FnMut(StatusSnapshot)>(
+    rd_raw: TcpRd,
+    shared: Arc<LinkShared>,
+    mut on_push: F,
+) {
     let mut rd = BufReader::new(rd_raw);
     loop {
         match recv_response(&mut rd).await {
-            Ok(Response::StatusUpdate { status }) | Ok(Response::Status { status }) => {
-                handle_status(&app, status);
-            }
+            Ok(Response::StatusUpdate { status }) => on_push(status),
             Ok(other) => {
                 let tx = shared.pending.lock().unwrap().pop_front();
-                if let Some(tx) = tx {
-                    let _ = tx.send(Ok(other));
-                } else {
-                    tracing::debug!(?other, "unsolicited daemon response");
+                match (tx, other) {
+                    (Some(tx), resp) => {
+                        let _ = tx.send(Ok(resp));
+                    }
+                    // 握手应答（无在途请求）：作为初始状态推送处理
+                    (None, Response::Status { status }) => on_push(status),
+                    (None, other) => tracing::debug!(?other, "unsolicited daemon response"),
                 }
             }
             Err(e) => {
@@ -260,7 +283,6 @@ async fn reader_loop(rd_raw: TcpRd, shared: Arc<LinkShared>, app: AppHandle) {
         }
     }
     shared.teardown().await;
-    let _ = app.emit("vpn-link", false);
 }
 
 // ---------- 窗口辅助 ----------
@@ -569,4 +591,151 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mp_ipc::codec::recv_request;
+    use std::sync::Mutex as StdMutex;
+
+    fn snap(state: &str) -> StatusSnapshot {
+        StatusSnapshot { state: state.into(), rtt_ms: None, server_ip: None, client_ip: None }
+    }
+
+    fn connect_req() -> Request {
+        Request::Connect {
+            host: "vpn.example.com".into(),
+            port: 443,
+            username: "user".into(),
+            password: "pass".into(),
+            code: "123456".into(),
+        }
+    }
+
+    /// 建立一对「UI(LinkShared+reader_core) ↔ 假 daemon」的回环链路。
+    /// 返回共享链路与收到的推送列表（按到达顺序记录 state）。
+    async fn setup_link() -> (Arc<LinkShared>, Arc<StdMutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move { fake_daemon(listener).await });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (rd, wr) = tokio::io::split(stream);
+        let shared = Arc::new(LinkShared::new());
+        *shared.write.lock().await = Some(wr);
+
+        let pushes = Arc::new(StdMutex::new(Vec::new()));
+        let sink = pushes.clone();
+        tokio::spawn(reader_core(rd, shared.clone(), move |s| {
+            sink.lock().unwrap().push(s.state);
+        }));
+        (shared, pushes)
+    }
+
+    /// 假 daemon：对齐 crates/mp-daemon handle_conn 的真实行为——
+    /// - Connect：先推 StatusUpdate(connecting)（engine 状态变化触发广播），
+    ///   再回 Status(connected) 应答；两行**一次写出**，模拟应答与推送
+    ///   挤在同一 TCP 段；
+    /// - Status：回 Status 应答；
+    /// - Stop：回 Status(disconnected) 应答（真实 daemon 行为）。
+    async fn fake_daemon(listener: tokio::net::TcpListener) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (rd, mut wr) = tokio::io::split(stream);
+        let mut rd = BufReader::new(rd);
+        while let Ok(req) = recv_request(&mut rd).await {
+            let (push, resp) = match req {
+                Request::Connect { .. } => {
+                    (Some(snap("connecting")), Response::Status { status: snap("connected") })
+                }
+                Request::Status => (None, Response::Status { status: snap("disconnected") }),
+                Request::Stop => (None, Response::Status { status: snap("disconnected") }),
+                _ => (None, Response::Error { message: "unsupported".into() }),
+            };
+            let mut wire = String::new();
+            if let Some(s) = push {
+                wire.push_str(
+                    &serde_json::to_string(&Response::StatusUpdate { status: s }).unwrap(),
+                );
+                wire.push('\n');
+            }
+            wire.push_str(&serde_json::to_string(&resp).unwrap());
+            wire.push('\n');
+            use tokio::io::AsyncWriteExt as _;
+            wr.write_all(wire.as_bytes()).await.unwrap();
+            wr.flush().await.unwrap();
+        }
+    }
+
+    /// 回归（保存密码失效的根因）：daemon 对 Connect 的应答是
+    /// Response::Status。修复前 reader 把它当推送吃掉，`send` 永远等不到
+    /// 应答直到 125s 超时——前端 connect() 走 catch 提前 return，
+    /// 连接成功后的保存用户名/密码代码块从不执行。
+    #[tokio::test]
+    async fn connect_status_reply_resolves_pending_request() {
+        let (shared, _pushes) = setup_link().await;
+        let resp = tokio::time::timeout(Duration::from_secs(5), shared.send(connect_req()))
+            .await
+            .expect("send 应收到 daemon 的 Status 应答（修复前挂到超时）")
+            .unwrap();
+        match resp {
+            Response::Status { status } => assert_eq!(status.state, "connected"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Connect 在途时 daemon 的 StatusUpdate 广播必须走推送回调，
+    /// 且不影响应答归还（应答与推送同段写出，兼测 codec 批量解帧）。
+    #[tokio::test]
+    async fn interleaved_push_and_reply_are_routed_separately() {
+        let (shared, pushes) = setup_link().await;
+        let resp = tokio::time::timeout(Duration::from_secs(5), shared.send(connect_req()))
+            .await
+            .expect("应答必须归还挂起请求")
+            .unwrap();
+        assert!(matches!(resp, Response::Status { ref status } if status.state == "connected"));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pushes.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("推送必须经 on_push 送达");
+        assert_eq!(pushes.lock().unwrap().as_slice(), ["connecting"]);
+    }
+
+    /// link_supervisor 建链握手：pending 为空时，Status 应答按初始状态推送处理。
+    #[tokio::test]
+    async fn handshake_status_without_pending_is_pushed() {
+        let (shared, pushes) = setup_link().await;
+        // 不发任何请求，仅做握手查询（对齐 link_supervisor 的直发方式）
+        {
+            let mut g = shared.write.lock().await;
+            let w = g.as_mut().unwrap();
+            mp_ipc::codec::send_request(&Request::Status, w).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pushes.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("握手应答应作为推送送达");
+        assert_eq!(pushes.lock().unwrap().as_slice(), ["disconnected"]);
+    }
+
+    /// Stop / Status 请求的应答同样是 Response::Status，也必须归还。
+    #[tokio::test]
+    async fn stop_and_status_replies_resolve_pending() {
+        let (shared, _pushes) = setup_link().await;
+        for req in [Request::Status, Request::Stop, Request::Status] {
+            let resp = tokio::time::timeout(Duration::from_secs(5), shared.send(req))
+                .await
+                .expect("应答必须归还挂起请求（FIFO）")
+                .unwrap();
+            assert!(matches!(resp, Response::Status { .. }), "unexpected: {resp:?}");
+        }
+    }
 }
