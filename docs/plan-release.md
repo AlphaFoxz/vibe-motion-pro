@@ -58,28 +58,39 @@ runbook 是开发流程，不能当作用户体验。原版商业客户端的拓
 - IPC 传输：双平台都是 TCP loopback `127.0.0.1:62000`（`MP_IPC_ADDR` 可覆盖）——
   **本计划保持不变**（named pipe / unix socket 是后续优化项，非必需）
 
-## P0 daemon 生命周期模式（双平台共用底座）
+## P0 daemon 生命周期模式（双平台共用底座）——✅ 已完成（2026-11-17）
 
-改动点全部在 `crates/mp-daemon/src/main.rs`（装配层），不进 lib.rs 业务逻辑：
+改动点全部在 `crates/mp-daemon/src/main.rs`（装配层）+ lib.rs 一个纯增量方法：
 
-- [ ] 启动参数 `--managed`（受宿主管理）与 `--parent-pid <PID>`（Windows 必传；
-      Unix 侧直接 `getppid()`，参数可忽略）。**手写 `std::env::args` 解析即可，不引 clap**
-      （保持 daemon 零新增依赖，musl 静态构建不受影响）
-- [ ] 父进程看护：抽纯函数（如 `fn parent_expired(last_alive: Instant, now: Instant) -> bool`，
-      宽限建议 3s，防 UI 短暂重启误杀）+ 单元测试；Windows 用 `OpenProcess` 探活
-      （`windows-sys` 已在依赖树内）；poll 间隔 1s，挂在主循环 select 的独立分支
-- [ ] 父进程死亡 → 走**既有** teardown 语义退出（TUN Drop 已负责路由/DNS 回滚，
-      不新写清理逻辑），退出码与日志写明 `managed: parent exited`
-- [ ] `--managed` 下 bind 失败：**跳过 10 次重试立即退出**（语义 = 已有实例在跑，
-      UI 应去连接而非再拉起）；退出码区分「端口被占」与其他错误
-- [ ] 非 managed（现状：手动/开发模式）行为完全不变——runbook 流程不受影响
+- [x] 启动参数 `--managed`（受宿主管理）与 `--parent-pid <PID>`（Windows 必传；
+      Unix 侧直接 `getppid()`，参数可忽略）。手写 `std::env::args` 解析，
+      支持 `--parent-pid=N` 等价形式，零新增依赖（musl 静态构建不受影响）
+- [x] 父进程看护：纯函数 `parent_expired` + 单测（7 个新测试）；Windows
+      `OpenProcess(QUERY_LIMITED_INFORMATION | SYNCHRONIZE)` + `WaitForSingleObject(0)`
+      轮询；宽限 3s 防 UI 短暂重启误杀；Unix `getppid() != 启动时记录值`
+- [x] 父进程死亡 → 既有 teardown 语义退出（logout → TUN teardown → pump shutdown；
+      状态锁被在途 Connect 持有时轮询 try_lock 最多 125s，超时直接退出交内核回收）
+- [x] `--managed` 下 bind 失败：**接管等待 5s 后让位退出（code 10）**——
+      立即退出会让「UI 崩溃后立刻重启」竞态反复触发 UAC 重拉，见下方偏差记录
+- [x] 非 managed（现状：手动/开发模式）行为完全不变——runbook 流程不受影响
 
-验证：
+**实施偏差（相对本计划初稿，均已定稿）**：
 
-- [ ] 纯函数单测；`cargo test --workspace` 全绿
-- [ ] 真机：`--managed --parent-pid <随便一个将死的进程>` → 父进程退出后 daemon 数秒退出，
-      `route print` / `ip route` 无残留
-- [ ] 双开 daemon（第二个 `--managed`）→ 第二个立即退出，第一个不受影响
+1. bind 让位语义从"立即退出"改为"接管等待 5s 后退出 code 10"：老 daemon（父进程
+   已死、处退出宽限）通常 3s 内释放端口，新 daemon 无需重拉（少一次 UAC）；
+2. lib.rs 新增 `logout_last_session_await`（纯增量）：退出路径必须等待注销完成，
+   spawn 版会随 runtime drop 被取消、注销请求发不出去；原 spawn 版行为不变；
+3. Windows 教训：`OpenProcess` 不带 `SYNCHRONIZE` 时 `WaitForSingleObject` 恒返回
+   WAIT_FAILED，曾被误判为"存活"导致 daemon 永不退出（真机实证后修复）；
+4. managed 模式启动即 `FreeConsole()`：提权拉起 console 子系统二进制会弹 conhost
+   窗口，尽早脱离（仍会闪现一瞬，纯化妆问题）。
+
+验证（全部通过，2026-11-17 真机）：
+
+- [x] 单测 7 项（args 解析 ×5 + parent_expired ×2）；workspace 103 测试全绿
+- [x] 父进程死亡 → daemon 3.1s 退出（code 0），teardown 日志完整
+- [x] 健康实例占用端口 → managed 新实例等待 ~5s 后让位退出（code 10）
+- [x] 接管窗口内老实例死亡 → 新实例接管 bind 并继续服务
 
 ## P1 Windows sidecar
 
