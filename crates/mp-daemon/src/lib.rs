@@ -176,8 +176,20 @@ pub async fn connect_with_login(
     {
         Ok(l) => Some(l),
         Err(e) => {
-            tracing::warn!("TUN 降级运行（无本地转发）: {e}");
-            None
+            // 硬失败，绝不降级：降级 = UI 显示"已连接"但数据路径是空壳
+            // （真机事故 2026-11-18：非提权 shell 下 wintun namespace 拒绝访问
+            //  → 降级连接 → 用户 6 分钟浏览全不通后怒杀进程）。
+            // 唯一例外：MP_TUN_DEGRADED_OK=1（测试环境无提权，验证登录链路用）。
+            if std::env::var("MP_TUN_DEGRADED_OK").map(|v| v == "1").unwrap_or(false) {
+                tracing::warn!("TUN 降级运行（测试模式，无本地转发）: {e}");
+                None
+            } else {
+                tracing::error!("TUN bring_up 失败（通常缺管理员权限或 wintun 被占）: {e}");
+                let _ = pump.shutdown().await;
+                return Err(format!(
+                    "本地虚拟网卡创建失败（需要管理员权限运行）: {e}"
+                ));
+            }
         }
     };
     Ok((pump, tun, apps, netcfg, Some((tunnel_host.clone(), cookie))))
@@ -983,6 +995,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn connect_login_full_flow_over_ipc() {
+        // 测试环境通常无提权：wintun 网卡创建必然失败，允许降级以验证登录链路
+        std::env::set_var("MP_TUN_DEGRADED_OK", "1");
         let port = spawn_mock_gateway().await;
         let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
