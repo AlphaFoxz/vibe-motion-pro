@@ -560,18 +560,27 @@ function switchTab(tab: "connect" | "servers") {
 
 // ---------- 初始化 ----------
 
+/** 拉取服务器列表 + 预选：默认(autoconnect) > 上次选择 > 第一个。 */
+async function bootstrapProfiles() {
+  await loadProfiles();
+  const def = profiles.find((p) => p.autoconnect);
+  const pick = def?.id ?? selectedId ?? profiles[0]?.id;
+  if (pick) selectProfile(pick);
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   renderStatic();
-  loadProfiles().then(() => {
-    // 启动预选：默认(autoconnect) > 上次选择 > 第一个
-    const def = profiles.find((p) => p.autoconnect);
-    const pick = def?.id ?? selectedId ?? profiles[0]?.id;
-    if (pick) selectProfile(pick);
-  });
+  void bootstrapProfiles();
 
   // 事件桥（Rust 长连接推送）
   void listen<StatusSnapshot>("vpn-status", (ev) => { connectingLocal = false; applyStatus(ev.payload); });
-  void listen<boolean>("vpn-link", (ev) => setOffline(!ev.payload));
+  // daemon 晚于 UI 启动：DOMContentLoaded 那次拉取会落空（profile_list 走的是
+  // 尚未建立的 daemon 链路），列表整个会话为空且用户名/密码回填不会触发。
+  // 链路恢复时补拉一次；已有列表（正常会话内的断线重连）则不打扰。
+  void listen<boolean>("vpn-link", (ev) => {
+    setOffline(!ev.payload);
+    if (ev.payload && profiles.length === 0) void bootstrapProfiles();
+  });
   // daemon 自动拉起结果：ok 不打扰（连接随后自动恢复）；被拒/失败给出指引
   void listen<{ kind: string; detail?: string }>("daemon-spawn", (ev) => {
     const d = t(lang);

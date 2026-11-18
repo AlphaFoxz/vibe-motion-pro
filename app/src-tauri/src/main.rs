@@ -253,7 +253,11 @@ fn ui_spawn_daemon() -> SpawnOutcome {
         };
         let daemon = dir.join("mp-daemon.exe");
         if !daemon.exists() {
-            // 开发模式（tauri dev 不拷贝 bundle resources）：走 runbook 手动起 daemon
+            // exe 缺位：bundle resources 只在 tauri build 时拷贝，dev 下从未
+            // cargo build -p mp-daemon 就会落到这里。注意：本仓库 cargo workspace
+            // 共享 target/debug，daemon 构建过一次（且按 runbook 放好 wintun.dll）
+            // 后 exe 就在 UI exe 旁，dev 同样走自动拉起；runbook 里管理员终端手动
+            // cargo run -p mp-daemon 只在需要 RUST_LOG=debug 看 daemon 日志时才有必要。
             return SpawnOutcome::Error {
                 detail: format!("未找到守护进程二进制（{}）", daemon.display()),
             };
