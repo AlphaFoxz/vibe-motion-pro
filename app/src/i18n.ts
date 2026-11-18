@@ -25,6 +25,7 @@ const dict = {
     btnConnect: "连　接",
     btnConnecting: "连接中…",
     btnDisconnect: "断开连接",
+    btnDisconnecting: "断开中…",
     // 底部 Tab
     tabConnect: "连接",
     tabServers: "服务器",
@@ -92,6 +93,7 @@ const dict = {
     btnConnect: "Connect",
     btnConnecting: "Connecting…",
     btnDisconnect: "Disconnect",
+    btnDisconnecting: "Disconnecting…",
     tabConnect: "Connect",
     tabServers: "Servers",
     dur: "Duration",
@@ -153,6 +155,7 @@ const dict = {
     btnConnect: "接続",
     btnConnecting: "接続中…",
     btnDisconnect: "切断",
+    btnDisconnecting: "切断中…",
     tabConnect: "接続",
     tabServers: "サーバー",
     dur: "接続時間",

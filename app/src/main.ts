@@ -37,6 +37,7 @@ let selectedId: string | null = localStorage.getItem("mp_last_profile") || null;
 let status: StatusSnapshot = { state: "disconnected", rtt_ms: null, server_ip: null, client_ip: null };
 let offline = false; // 与 daemon 的链路断开
 let connectingLocal = false; // 乐观置位：点击连接后立即进入 connecting 视觉态
+let disconnectingLocal = false; // 乐观置位：点击断开后立即进入 disconnecting 视觉态
 let connectedAt = 0;
 let tickTimer: number | null = null;
 let editingId: string | null = null; // 编辑器打开时的 profile id；null = 新建
@@ -147,8 +148,11 @@ const STATE_KEY: Record<string, keyof ReturnType<typeof t>> = {
 
 function renderStatusUI() {
   const d = t(lang);
-  // 乐观连接态：本地点击优先于推送（推送最长 1s 延迟）
-  const state = connectingLocal && status.state === "disconnected" ? "connecting" : status.state;
+  // 乐观连接/断开态：本地点击优先于推送（推送最长 1s 延迟）
+  const state =
+    connectingLocal && status.state === "disconnected" ? "connecting"
+    : disconnectingLocal && status.state === "connected" ? "disconnecting"
+    : status.state;
 
   $("ring").setAttribute("data-state", state);
   $("brand-dot").setAttribute("data-state", state);
@@ -169,7 +173,7 @@ function renderStatusUI() {
   } else if (busy) {
     btn.dataset.action = "connect";
     btn.disabled = true;
-    btn.textContent = `${d.btnConnecting}`;
+    btn.textContent = state === "disconnecting" ? d.btnDisconnecting : d.btnConnecting;
     $("fields").classList.remove("collapsed");
   } else {
     btn.dataset.action = "connect";
@@ -510,11 +514,16 @@ async function connect() {
 
 async function disconnect() {
   connectingLocal = false;
+  disconnectingLocal = true;
+  renderStatusUI(); // 即时反馈：状态文本"断开中"、按钮/表单锁定、圆环动画
   try {
     const snap = await invoke<StatusSnapshot>("vpn_stop");
+    disconnectingLocal = false;
     applyStatus(snap);
   } catch (e) {
+    disconnectingLocal = false;
     showError(String(e));
+    renderStatusUI();
   }
 }
 
@@ -534,7 +543,7 @@ function applyStatus(snap: StatusSnapshot) {
     connectedAt = 0;
     stopTicker();
   }
-  if (snap.state === "disconnected") connectingLocal = false;
+  if (snap.state === "disconnected") { connectingLocal = false; disconnectingLocal = false; }
   renderStatusUI();
   renderServerCards();
 }
@@ -544,6 +553,7 @@ function setOffline(v: boolean) {
   $("offline-banner").classList.toggle("hidden", !offline);
   if (offline) {
     connectingLocal = false;
+    disconnectingLocal = false;
     renderStatusUI();
   }
 }
@@ -573,7 +583,7 @@ window.addEventListener("DOMContentLoaded", () => {
   void bootstrapProfiles();
 
   // 事件桥（Rust 长连接推送）
-  void listen<StatusSnapshot>("vpn-status", (ev) => { connectingLocal = false; applyStatus(ev.payload); });
+  void listen<StatusSnapshot>("vpn-status", (ev) => { connectingLocal = false; disconnectingLocal = false; applyStatus(ev.payload); });
   // daemon 晚于 UI 启动：DOMContentLoaded 那次拉取会落空（profile_list 走的是
   // 尚未建立的 daemon 链路），列表整个会话为空且用户名/密码回填不会触发。
   // 链路恢复时补拉一次；已有列表（正常会话内的断线重连）则不打扰。
