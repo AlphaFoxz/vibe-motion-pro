@@ -53,6 +53,17 @@ cargo check -p mp-app         # Tauri 壳编译检查
 pnpm tauri dev                # UI 开发
 ```
 
+### 平台差异速览
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| 开发期起 daemon | 构建过一次后 UI 首次连接自动 UAC 拉起；或手动 `cargo run -p mp-daemon` | 手动 `cargo run -p mp-daemon`，或 `sudo bash scripts/install-daemon-dev-service.sh` 常驻服务 | 未支持 |
+| 用户安装 | NSIS：装完首连一次 UAC，sidecar 自动落位 | deb：内置 systemd unit，装完服务自启（[plan-release.md](docs/plan-release.md) P2） | 未分发 |
+| 特有依赖 | MSVC + wintun.dll | — | — |
+
+UI 在 Linux 上不会拉起 daemon（生命周期归 systemd/开发者管），连不上时 UI 静默重连。
+调试细节见 [docs/runbook.md](docs/runbook.md)（Windows / Linux 双平台手册）。
+
 ## 文档
 
 | 文档 | 内容 |
@@ -64,7 +75,7 @@ pnpm tauri dev                # UI 开发
 | [docs/runtime-forensics.md](docs/runtime-forensics.md) | 原版运行时取证（进程拓扑/协议流/心跳实测） |
 | [docs/feature-list.md](docs/feature-list.md) | 功能基线（8 大类） |
 | [docs/plan-release.md](docs/plan-release.md) | 发布架构实施计划（win sidecar / linux systemd） |
-| [docs/runbook.md](docs/runbook.md) | 真机运行手册（Windows 连通流程与故障排查） |
+| [docs/runbook.md](docs/runbook.md) | 真机运行手册（Windows/Linux 连通流程与故障排查） |
 
 ## License
 
