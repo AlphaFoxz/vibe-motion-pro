@@ -324,8 +324,17 @@ async fn link_supervisor(app: AppHandle) {
                     .elapsed();
                 if should_spawn_daemon(Some(down), spawn_attempts) {
                     spawn_attempts += 1;
-                    let outcome = ui_spawn_daemon();
-                    let _ = app.emit("daemon-spawn", &outcome);
+                    // 仅 Windows 有自动拉起实现（UAC sidecar）。Linux 的 daemon
+                    // 生命周期由 systemd 服务（安装版）或开发期手动 `cargo run
+                    // -p mp-daemon` 承担（plan-release.md P2），这里直接跳过，
+                    // 避免向前端弹「仅 Windows 支持自动拉起」的误导性错误。
+                    // attempts 仍照常累加，让 should_spawn_daemon 的配额语义
+                    // 在两个平台保持一致（含单测覆盖）。
+                    #[cfg(windows)]
+                    {
+                        let outcome = ui_spawn_daemon();
+                        let _ = app.emit("daemon-spawn", &outcome);
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(2000)).await;
             }
