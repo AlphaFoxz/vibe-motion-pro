@@ -202,22 +202,24 @@ fn handle_status(app: &AppHandle, snap: StatusSnapshot) {
 
 // ---------- 链路维护 ----------
 
-/// 断链多久后首次自动拉起 daemon（给"daemon 还没起"一点余量，也避免
-/// 应用启动瞬间的抖动直接触发 UAC）。
-const SPAWN_AFTER: Duration = Duration::from_secs(3);
-/// 首次拉起未果后，第二次（最后一次）拉起的等待时长。
+/// 断链多久后第二次（最后一次）拉起 daemon。首次拉起是「即连即判」：
+/// daemon 地址是 127.0.0.1，daemon 未运行时 tcp_connect 立即返回
+/// connection refused（毫秒级），因此首连失败即可断定 daemon 没起，
+/// 直接拉起，无需任何延迟；daemon 已运行时首连必然秒成功，不会走到
+/// 这里，UAC 也就不会误弹。
 const SPAWN_RETRY_AFTER: Duration = Duration::from_secs(20);
 /// 链路稳定在线多久后，重新获得自动拉起配额（防 daemon「秒死循环」
 /// 反复触发 UAC 轰炸；正常崩溃自愈不受影响）。
 const LINK_STABLE: Duration = Duration::from_secs(60);
 
 /// 是否应该自动拉起 daemon（纯函数便于单测）。`attempts` 为本次断链
-/// 已拉起次数（链路稳定在线 ≥ LINK_STABLE 后由调用方清零）。
+/// 已拉起次数（链路稳定在线 ≥ LINK_STABLE 后由调用方清零）。首次
+/// 断链即拉起（见 SPAWN_RETRY_AFTER 注释），第二次等 SPAWN_RETRY_AFTER。
 fn should_spawn_daemon(link_down: Option<Duration>, attempts: u32) -> bool {
-    let Some(down) = link_down else { return false };
+    let Some(_) = link_down else { return false };
     match attempts {
-        0 => down >= SPAWN_AFTER,
-        1 => down >= SPAWN_RETRY_AFTER,
+        0 => true,
+        1 => link_down.is_some_and(|d| d >= SPAWN_RETRY_AFTER),
         _ => false,
     }
 }
@@ -864,12 +866,12 @@ mod tests {
         }
     }
 
-    /// 断链拉起策略：3s 首次 / 20s 第二次 / 之后转人工；未断链不拉起。
+    /// 断链拉起策略：首连失败立即拉起 / 20s 第二次 / 之后转人工；未断链不拉起。
     #[test]
     fn spawn_policy_two_attempts_then_stop() {
         assert!(!should_spawn_daemon(None, 0), "链路正常时不拉起");
-        assert!(!should_spawn_daemon(Some(Duration::from_secs(1)), 0), "断链未满 3s");
-        assert!(should_spawn_daemon(Some(SPAWN_AFTER), 0), "断链 ≥3s 首次拉起");
+        assert!(should_spawn_daemon(Some(Duration::from_millis(1)), 0), "首连失败立即拉起");
+        assert!(should_spawn_daemon(Some(Duration::from_secs(1)), 0), "首次拉起");
         assert!(!should_spawn_daemon(Some(Duration::from_secs(10)), 1), "首次未果未满 20s");
         assert!(should_spawn_daemon(Some(SPAWN_RETRY_AFTER), 1), "二次拉起");
         assert!(!should_spawn_daemon(Some(Duration::from_secs(300)), 2), "配额用尽转人工");
