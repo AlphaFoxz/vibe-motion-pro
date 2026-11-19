@@ -24,7 +24,7 @@
 | 应用标识 | `com.alphafoxz.vibemotionpro` | `mp_core::APP_ID` = tauri.conf.json identifier；无连字符（注册表/DBus 兼容）；**发布后不可改** |
 | 配置/数据根目录 | `<config_dir>/com.alphafoxz.vibemotionpro/` | UI（Tauri 自动派生）与 daemon（显式 join APP_ID）同根 |
 | 临时目录 | `<temp>/com.alphafoxz.vibemotionpro/` | 崩溃栈、协议帧 dump |
-| 凭据服务名 | `VibeMotionPro`，key `vpn-pass:<profile_id>` | OS 凭据管理器/Keychain/Secret Service |
+| 凭据服务名 | `VibeMotionPro`，key `vpn-pass:host:<host>`（稳定键，host 归一小写）+ 兼容键 `vpn-pass:<profile_id>`（旧数据，读时兜底、存时迁移） | OS 凭据管理器/Keychain/Secret Service；profile 重建后按 host 仍可找回凭据 |
 | 内部 crate/二进制 | `mp-core` / `mp-daemon` / `mp-platform` / `mp-ipc` / `mp-app` | 内部命名，不发布 crates.io，无需跟随产品改名 |
 
 **刻意保留 `MotionPro` 字样的位置**（协议兼容/取证记录，不要“顺手”改名）：

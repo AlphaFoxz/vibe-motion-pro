@@ -70,6 +70,19 @@ function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+// 凭据稳定键：host 归一（trim+小写）。profile 删除重建后 id 变、host 不变，
+// 用户名/密码按 id 优先、host 键兜底，避免凭据「丢失」。
+// 与 Rust 侧 vpn-pass:host:<host>（密码）对应；用户名落在 localStorage。
+const hostKey = (host: string) => host.trim().toLowerCase();
+
+function savedUsername(id: string, host: string): string {
+  return (
+    localStorage.getItem(`mp_username:${id}`) ??
+    localStorage.getItem(`mp_username:host:${hostKey(host)}`) ??
+    ""
+  );
+}
+
 // ---------- 渲染：静态文案 ----------
 
 function renderStatic() {
@@ -353,28 +366,35 @@ function selectProfile(id: string, withHint = false) {
   renderServerSelect();
   renderServerCards();
 
-  // 回填用户名 / 记住的密码
-  const uname = localStorage.getItem(`mp_username:${id}`) ?? "";
-  ($("username") as HTMLInputElement).value = uname;
+  // 回填用户名 / 记住的密码（均按 id 优先、host 稳定键兜底）
+  ($("username") as HTMLInputElement).value = savedUsername(id, p.host);
   ($("password") as HTMLInputElement).value = "";
   ($("remember-pwd") as HTMLInputElement).checked = false;
   void (async () => {
     try {
-      const saved = await invoke<string | null>("password_get", { profileId: id });
+      const saved = await invoke<string | null>("password_get", { profileId: id, host: p.host });
       if (saved) {
         ($("password") as HTMLInputElement).value = saved;
         ($("remember-pwd") as HTMLInputElement).checked = true;
       }
-    } catch { /* keychain 不可用 */ }
+    } catch (e) {
+      // keychain 不可用（Linux 常见：缺 gnome-keyring/KWallet 或 DBus 环境）。
+      // 不静默：明确告知用户为什么密码没回填
+      console.warn("password_get failed:", e);
+      showError(t(lang).keyringMiss);
+    }
   })();
 
   if (withHint) showPickHint(p.name);
 }
 
 async function doDelete(id: string) {
+  const p = profiles.find((x) => x.id === id); // 先取 host（列表刷新后就没了）
   try {
     profiles = await invoke<Profile[]>("profile_remove", { profileId: id });
-    invoke("password_delete", { profileId: id }).catch(() => {});
+    // 清稳定键 + 旧 id 键；host 兜底用户名可能被同 host 的其他 profile 共享，
+    // 且用户名非敏感，故保留不清
+    invoke("password_delete", { profileId: id, host: p?.host ?? "" }).catch(() => {});
     localStorage.removeItem(`mp_last_connected:${id}`);
     localStorage.removeItem(`mp_username:${id}`);
     if (selectedId === id) { selectedId = null; localStorage.removeItem("mp_last_profile"); }
@@ -502,12 +522,16 @@ async function connect() {
 
   // 连接成功：记住凭据偏好
   if (selectedId) {
+    const p = profiles.find((x) => x.id === selectedId);
     localStorage.setItem(`mp_username:${selectedId}`, username);
+    // host 稳定键兜底：profile 重建（新 id）后用户名仍可回填
+    if (p) localStorage.setItem(`mp_username:host:${hostKey(p.host)}`, username);
     const remember = ($("remember-pwd") as HTMLInputElement).checked;
     if (remember) {
-      invoke("password_save", { profileId: selectedId, password }).catch(() => showError(d.keyringFail));
+      invoke("password_save", { profileId: selectedId, host: p?.host ?? "", password })
+        .catch(() => showError(d.keyringFail));
     } else {
-      invoke("password_delete", { profileId: selectedId }).catch(() => {});
+      invoke("password_delete", { profileId: selectedId, host: p?.host ?? "" }).catch(() => {});
     }
   }
 }

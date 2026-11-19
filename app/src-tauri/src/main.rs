@@ -534,29 +534,64 @@ async fn profile_remove(state: State<'_, AppState>, profile_id: String) -> Resul
 }
 
 // ---------- OS 凭据管理器（记住密码） ----------
+//
+// 键设计（两级）：
+// - 稳定键 `vpn-pass:host:<host>`（host 归一为 trim+小写）：profile 删除重建后
+//   id 会变、host 不变，凭据仍可按 host 找回；同 host 的多个 profile 共享一份。
+// - 兼容键 `vpn-pass:<profile_id>`：旧版按 id 存的历史数据。读取时兜底兼容，
+//   保存成功后顺手迁移清理。
 
-fn keyring_entry(profile_id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new("VibeMotionPro", &format!("vpn-pass:{profile_id}")).map_err(|e| e.to_string())
+fn keyring_entry(key: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new("VibeMotionPro", key).map_err(|e| e.to_string())
+}
+
+fn stable_pass_key(host: &str) -> String {
+    format!("vpn-pass:host:{}", host.trim().to_lowercase())
+}
+
+fn legacy_pass_key(profile_id: &str) -> String {
+    format!("vpn-pass:{profile_id}")
 }
 
 #[tauri::command]
-async fn password_save(profile_id: String, password: String) -> Result<(), String> {
+async fn password_save(profile_id: String, host: String, password: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let entry = keyring_entry(&profile_id)?;
-        entry.set_password(&password).map_err(|e| e.to_string())
+        let stable = !host.trim().is_empty();
+        let key = if stable { stable_pass_key(&host) } else { legacy_pass_key(&profile_id) };
+        keyring_entry(&key)?.set_password(&password).map_err(|e| e.to_string())?;
+        // 已落稳定键：迁移清理旧 id 键（历史遗留），失败不打扰
+        if stable {
+            if let Ok(old) = keyring_entry(&legacy_pass_key(&profile_id)) {
+                let _ = old.delete_credential();
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-async fn password_get(profile_id: String) -> Result<Option<String>, String> {
+async fn password_get(profile_id: String, host: String) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
-        let entry = keyring_entry(&profile_id)?;
-        match entry.get_password() {
-            Ok(p) => Ok(Some(p)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e.to_string()),
+        // 稳定 host 键优先，未命中再兜底旧 id 键；host 为空（异常调用）只查 id 键。
+        // 后端故障（如 Linux 无 Secret Service）时两键都试完，把真实错误交前端提示。
+        let mut keys = Vec::with_capacity(2);
+        if !host.trim().is_empty() {
+            keys.push(stable_pass_key(&host));
+        }
+        keys.push(legacy_pass_key(&profile_id));
+        let mut last_err: Option<String> = None;
+        for key in keys {
+            match keyring_entry(&key)?.get_password() {
+                Ok(p) => return Ok(Some(p)),
+                Err(keyring::Error::NoEntry) => continue,
+                Err(e) => last_err = Some(e.to_string()),
+            }
+        }
+        match last_err {
+            Some(e) => Err(e),
+            None => Ok(None),
         }
     })
     .await
@@ -564,13 +599,21 @@ async fn password_get(profile_id: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn password_delete(profile_id: String) -> Result<(), String> {
+async fn password_delete(profile_id: String, host: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let entry = keyring_entry(&profile_id)?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.to_string()),
+        let mut keys = Vec::with_capacity(2);
+        if !host.trim().is_empty() {
+            keys.push(stable_pass_key(&host));
         }
+        keys.push(legacy_pass_key(&profile_id));
+        for key in keys {
+            let entry = keyring_entry(&key)?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?

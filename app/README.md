@@ -14,7 +14,11 @@
 - **Profiles = 服务器**：卡片（名称/host/隧道类型/上次连接/★默认）点击即预选并聚焦动态密保；
   两步删除确认；`autoconnect` 字段用作「默认服务器」。
 - **记住密码**：`keyring` crate 写入 OS 凭据管理器（Windows Credential Manager /
-  macOS Keychain / Linux Secret Service），key = `VibeMotionPro / vpn-pass:<profile_id>`。
+  macOS Keychain / Linux Secret Service）。key 两级：稳定键
+  `VibeMotionPro / vpn-pass:host:<host>`（host 归一小写，profile 重建后仍可找回）+
+  兼容键 `vpn-pass:<profile_id>`（旧版数据，读取兜底、保存后迁移清理）。
+  keychain 读取失败不再静默——提示「已保存的密码未回填」（Linux 常见于缺
+  gnome-keyring/KWallet）。
 - **i18n**：zh-CN / en / ja；语言切换同步托盘菜单文案（`set_tray_texts`）。
 
 ## IPC 模型（对应 main.rs）

@@ -41,6 +41,7 @@ const dict = {
     errRequired: "请填写名称和服务器地址",
     pickHint: "已选择「{name}」，输入动态密保后点击连接",
     keyringFail: "凭据管理器不可用，本次不保存密码",
+    keyringMiss: "凭据管理器不可用，已保存的密码未回填",
     spawnDenied: "守护进程需要管理员权限（UAC 被拒绝），请允许后重试",
     spawnError: "守护进程启动失败",
     // 服务器视图
@@ -106,6 +107,7 @@ const dict = {
     errRequired: "Name and server address are required",
     pickHint: "Selected \"{name}\" — enter passcode and connect",
     keyringFail: "Keychain unavailable, password not saved this time",
+    keyringMiss: "Keychain unavailable — saved password not restored",
     spawnDenied: "Daemon needs administrator permission (UAC denied) — please allow and retry",
     spawnError: "Failed to start daemon",
     serversHint: "Save your VPN gateways and connect with one click.",
@@ -168,6 +170,7 @@ const dict = {
     errRequired: "名前とサーバーアドレスは必須です",
     pickHint: "「{name}」を選択 — パスコードを入力して接続",
     keyringFail: "キーチェーン利用不可、パスワードは保存しません",
+    keyringMiss: "キーチェーン利用不可 — 保存済みパスワードを復元できません",
     spawnDenied: "デーモンには管理者権限が必要です（UAC が拒否されました）",
     spawnError: "デーモンの起動に失敗しました",
     serversHint: "よく使う VPN ゲートウェイを保存し、ワンクリックで接続。",
