@@ -1,0 +1,55 @@
+# git-cliff 配置：发布（打 v* tag）时按「约定式提交」自动生成改动日志。
+# 由 .github/workflows/release.yml 的 release 任务调用：
+#   - git cliff（全量）              → CHANGELOG.md，自动回写 master
+#   - git cliff --latest --strip all → 本次版本改动，作为 GitHub Release 正文
+# 提交需符合 feat/fix/docs/... 规范（见仓库提交历史）。
+# 文档：https://git-cliff.org/docs/configuration
+
+[changelog]
+# 全量 CHANGELOG.md 的文件头（生成 Release 正文时会 strip 掉）
+header = """
+# 更新日志\n
+本文件由 CI 在发布时依据 [约定式提交](https://www.conventionalcommits.org/zh-hans/) 自动生成，请勿手工编辑。\n
+"""
+
+# 每个版本的渲染模板（行尾 \ 为 TOML 续接，\n 为显式换行）
+body = """
+{% if version %}\
+## {{ version }}（{{ timestamp | date(format="%Y-%m-%d") }}）\
+{% else %}\
+## 未发布\
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}\
+\n\
+### {{ group }}\n\
+{% for commit in commits %}\
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}{% if commit.breaking %}**[重大变更]** {% endif %}{{ commit.message | split(pat="\n") | first }}\n\
+{% endfor %}\
+{% endfor %}\n
+"""
+trim = true
+
+[git]
+conventional_commits = true      # 按约定式提交解析 type(scope): 描述
+filter_unconventional = true     # 丢弃不符合规范的提交（如 "Merge branch 'dev'"）
+split_commits = false
+protect_breaking_commits = true  # 含 BREAKING CHANGE 的提交始终保留
+
+# 提交类型 → 中文分组标题（与仓库提交习惯一一对应）
+commit_parsers = [
+    { message = "^feat", group = "✨ 功能" },
+    { message = "^fix", group = "🐛 修复" },
+    { message = "^perf", group = "⚡ 性能" },
+    { message = "^refactor", group = "♻️ 重构" },
+    { message = "^docs", group = "📚 文档" },
+    { message = "^test", group = "🧪 测试" },
+    { message = "^build", group = "📦 构建" },
+    { message = "^ci", group = "🤖 CI" },
+    { message = "^style", group = "🎨 格式" },
+    { message = "^chore", group = "🔧 杂项" },
+    { message = "^revert", group = "⏪ 回退" },
+]
+
+# 只统计 v* 形式的发布 tag；提交按时间正序（旧→新）
+tag_pattern = "v[0-9].*"
+sort_commits = "oldest"

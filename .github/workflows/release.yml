@@ -1,6 +1,9 @@
 name: Release
 # 发布流程：在 master 上打 tag（v*）并推送后触发。
-# prepare 校验 → build 双平台打包 → release 汇总发布 GitHub Release。
+# prepare 校验 → build 双平台打包 → release 汇总发布 GitHub Release，
+# 并用 git-cliff 按约定式提交自动生成改动日志：
+#   - 全量 CHANGELOG.md 回写 master（cliff.toml 定义分组规则）
+#   - 本次版本改动作为 Release 正文
 # （ci.yml 只挂 branches 过滤，tag 推送不会误触 CI。）
 on:
   push:
@@ -99,19 +102,59 @@ jobs:
             target/release/bundle/appimage/*.AppImage
           if-no-files-found: error
 
-  # 下载两个平台的产物，合并成一个 Release（自动生成 release notes）。
+  # 下载两个平台的产物，合并成一个 Release。
+  # 发布前用 git-cliff 依约定式提交生成改动日志（配置见 cliff.toml）：
+  # 全量 CHANGELOG.md 自动回写 master，本次版本改动作为 Release 正文。
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # git-cliff 需要完整历史与所有 tag，fetch-depth 必须为 0
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # checkout 到的是 tag 的 detached HEAD，切回 master 以便回写 CHANGELOG.md
+      - name: 切到 master
+        run: git checkout master
+      - name: 生成完整 CHANGELOG.md
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+        env:
+          OUTPUT: CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+      # --latest = 本次推送的 tag；--strip all 去掉文件头，只留本版本段落
+      - name: 生成本次版本改动日志（Release 正文）
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: -vv --latest --strip all
+        env:
+          OUTPUT: release-notes.md
+          GITHUB_REPO: ${{ github.repository }}
+      # 回写改动日志到 master；若仓库开了分支保护导致推送失败，
+      # 不阻断发布（改动日志已在 Release 正文中）
+      - name: 回写 CHANGELOG.md 到 master
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "CHANGELOG.md 无变化，跳过提交"
+          else
+            git commit -m "docs(changelog): ${{ github.ref_name }} 自动更新改动日志"
+            git push origin HEAD:master
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: MotionPro ${{ github.ref_name }}
           files: dist/**
+          body_path: release-notes.md
           generate_release_notes: true
           fail_on_unmatched_files: true
