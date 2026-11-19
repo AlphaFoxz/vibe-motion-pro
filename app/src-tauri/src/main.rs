@@ -1,3 +1,5 @@
+// release 构建用 GUI 子系统隐藏控制台窗口；debug 保留控制台便于看日志
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! Tauri UI 进程：对应原版 MotionPro.exe（Qt5 UI）。
 //!
 //! 与 mp-daemon 的通信模型：**单条长连接 + 请求/推送多路复用**。

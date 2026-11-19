@@ -62,6 +62,18 @@ systemctl disable mp-daemon.service >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true
 PRERM
 
+# dpkg -r → remove：保留用户数据；dpkg --purge → purge：连数据目录一起清掉
+install -D -m 0755 /dev/null "$tmp/root/DEBIAN/postrm"
+cat > "$tmp/root/DEBIAN/postrm" <<'POSTRM'
+#!/bin/sh
+set -e
+if [ "$1" = "purge" ]; then
+    rm -rf /var/lib/vibe-motionpro
+fi
+systemctl daemon-reload >/dev/null 2>&1 || true
+exit 0
+POSTRM
+
 dpkg-deb -b --root-owner-group "$tmp/root" "$out_deb"
 echo "---- service deb: $out_deb ----"
 dpkg-deb -c "$out_deb" | grep -E 'mp-daemon|systemd|DEBIAN' || true
