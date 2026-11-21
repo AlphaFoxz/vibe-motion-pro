@@ -53,7 +53,7 @@ TLS 连接网关 443 (openssl init, TLS1.2, socket 1380)
 - S→C 101 字节 record ×~1270（含重复 tap，去重后约 254）≈ 心跳回应（96B 明文）
 - 181/133（S→C）与 170/255/149（C→S）为偶发数据帧
 - 载荷为 TLS 加密，**帧内格式需 Ghidra 逆向 vl3vpn.dll 才能确认**（heartbeat 帧明文约 80B）
-- 抓包工具链：pktmon（需管理员）→ `pktmon etl2pcap` → 自研 `scripts/parse_pcap.js` / `scripts/analyze_gw.js`（已入库，pktmon 多组件重复捕获需按 seq 去重）
+- 抓包工具链：pktmon（需管理员）→ `pktmon etl2pcap` → 自研 `scripts/parse_pcap.mjs` / `scripts/analyze_gw.mjs`（已入库，pktmon 多组件重复捕获需按 seq 去重）
 
 ## 密码学栈
 - openssl init（libeay32 1.0 系）；TLS12 first priority，带协议降级尝试（Try TLSv1_2_client_method）

@@ -1,5 +1,5 @@
 // 生成占位 icon.ico（32x32 32bpp 全色块）
-const fs = require("fs");
+import fs from "node:fs";
 
 const w = 32, h = 32, bpp = 32;
 const bih = Buffer.alloc(40);
@@ -7,11 +7,10 @@ bih.writeUInt32LE(40, 0);        // biSize
 bih.writeInt32LE(w, 4);          // biWidth
 bih.writeInt32LE(h * 2, 8);      // biHeight (XOR+AND)
 bih.writeUInt16LE(1, 12);        // biPlanes
-bih.writeUInt16LE(bpp, 14);      // biBitCount
+bih.writeUInt16LE(bpp, 14);      // biBitDepth
 bih.writeUInt32LE(0, 16);        // biCompression
 bih.writeUInt32LE((w * h * bpp) / 8, 20);
-bih.writeUInt32LE(0, 28);
-bih.writeUInt32LE(0, 32);
+bih.writeUInt32LE(0, 28);        // biClrImportant
 
 const px = Buffer.alloc(w * h * 4);
 for (let i = 0; i < w * h; i++) {

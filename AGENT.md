@@ -50,5 +50,5 @@
 ## 环境
 
 - Windows 10/11 + MSVC（SDK 已装）+ Node/pnpm + Rust stable
-- 抓包需管理员：`pktmon` → `pktmon etl2pcap` → `scripts/parse_pcap.js`
+- 抓包需管理员：`pktmon` → `pktmon etl2pcap` → `scripts/parse_pcap.mjs`
 - pnpm 需 `--registry=https://registry.npmjs.org`（镜像不通）

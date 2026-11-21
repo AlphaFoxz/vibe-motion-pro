@@ -110,7 +110,7 @@ struct AppState {
 /// 连接成功后自动收起窗口（原版 ShowUIAfterConnected 语义的镜像）。
 static AUTO_HIDE: AtomicBool = AtomicBool::new(true);
 
-// ---------- 托盘图标资源（scripts/gen_brand_icons.js 生成） ----------
+// ---------- 托盘图标资源（scripts/gen_brand_icons.mjs 生成） ----------
 
 const TRAY_CONNECTED: &[u8] = include_bytes!("../icons/tray-connected.png");
 const TRAY_CONNECTING: &[u8] = include_bytes!("../icons/tray-connecting.png");

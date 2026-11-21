@@ -9,7 +9,7 @@
   （daemon 1s 广播仅在变化时发送；UI 不再轮询）。连接中按钮转 spinner、表单锁定。
 - **连接成功**：托盘变绿 + 系统通知 + 自动收起到托盘（`mp_autohide` 可关，Rust 侧延迟 1.2s 执行）。
 - **托盘**：三态图标（`icons/tray-{connected,connecting,disconnected}.png`，
-  由 `scripts/gen_brand_icons.js` 生成）+ 菜单（状态行/显示窗口/连接/断开/退出）；
+  由 `scripts/gen_brand_icons.mjs` 生成）+ 菜单（状态行/显示窗口/连接/断开/退出）；
   左键切换窗口；关窗 = 收起托盘，退出走菜单。
 - **Profiles = 服务器**：卡片（名称/host/隧道类型/上次连接/★默认）点击即预选并聚焦动态密保；
   两步删除确认；`autoconnect` 字段用作「默认服务器」。

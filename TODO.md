@@ -68,7 +68,7 @@
 
 - [x] UI 重构（2026-11-14，dev-7）：双视图（连接/服务器）+ 状态圆环 + 400×580 固定窗口；
   Rust 侧与 daemon 单条长连接多路复用（请求/推送同连接，UI 告别 3s 轮询）；
-  托盘三态图标（scripts/gen_brand_icons.js 生成）+ 菜单 + 左键切换 + 关窗到托盘；
+  托盘三态图标（scripts/gen_brand_icons.mjs 生成）+ 菜单 + 左键切换 + 关窗到托盘；
   连接成功通知 + 自动收起（可关）；Profiles → 服务器卡片（默认★/上次连接/两步删除）；
   记住密码进 OS keychain（keyring crate）；i18n 全量文案 + 语言切换同步托盘菜单
 - [x] daemon IPC 并发修复（2026-11-14，随 dev-7）：handle_conn 内联 await 导致持久 UI 连接
@@ -86,7 +86,7 @@
 - [x] 三平台打包冒烟 CI（2026-11-14，不签名）：`bundle` 矩阵任务跑
       `tauri build`（win=nsis / linux=deb+appimage / mac=app+dmg），产物上传
       artifact 供人工检查；全套应用图标（icon.icns / 多尺寸 ico / png，
-      `scripts/gen_brand_icons.js` 出 1024 源图 + `tauri icon` 生成）；
+      `scripts/gen_brand_icons.mjs` 出 1024 源图 + `tauri icon` 生成）；
       release profile 加 strip/lto/codegen-units=1
 - [x] Linux deb 真机构建与安装验证（2026-11-14，WSL Ubuntu）：`MotionPro_0.1.0_amd64.deb`
       （4.12MB）构建 → dpkg -i → ldd 无缺库 → WSLg GUI 冒烟（进程存活）→ dpkg -r

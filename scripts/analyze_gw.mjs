@@ -1,5 +1,5 @@
 // 分析网关流 203.0.113.10:443 的包间隔与尺寸时序
-const fs = require("fs");
+import fs from "node:fs";
 const buf = fs.readFileSync(process.argv[2] || "C:/Users/84195/mpcap.pcapng");
 
 let off = 0;

@@ -1,5 +1,5 @@
 // pcapng 解析器：提取 UDP 65432 (vpnd IPC) 载荷 + TCP 443 流量统计
-const fs = require("fs");
+import fs from "node:fs";
 const buf = fs.readFileSync(process.argv[2] || "C:/Users/84195/mpcap.pcapng");
 
 let off = 0;

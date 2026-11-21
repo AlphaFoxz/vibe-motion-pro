@@ -2,11 +2,12 @@
 // - app/src-tauri/icons/tray-{connected,connecting,disconnected}.png  托盘三态 32x32 RGBA
 // - app/src-tauri/icons/icon.ico                                     应用/任务栏图标（32+16 BMP 条目）
 // 设计：实心圆盘 + 白色对勾（connected）；琥珀色圆环带缺口（connecting）；灰色圆盘（disconnected）。
-const fs = require("fs");
-const path = require("path");
-const zlib = require("zlib");
+import fs from "node:fs";
+import path from "node:path";
+import zlib from "node:zlib";
+import { fileURLToPath } from "node:url";
 
-const OUT_DIR = path.join(__dirname, "..", "app", "src-tauri", "icons");
+const OUT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "src-tauri", "icons");
 
 // ---------- PNG 编码 ----------
 const CRC_TABLE = (() => {
