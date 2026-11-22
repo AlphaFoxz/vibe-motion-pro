@@ -1,6 +1,7 @@
 // 升版本：只负责改分散在各处的版本号，git 提交/打 tag/推送由人工完成。
 //   1) Cargo.toml [workspace.package]（各 crate 均走 version.workspace 继承）
-//   2) app/src-tauri/tauri.conf.json（Release CI prepare 强校验项）
+//   2) app/src-tauri/tauri.conf.json（Release CI prepare 强校验项；
+//      UI 标题旁版本小字与托盘 tooltip 运行时均读此处，无需单独维护）
 //   3) app/package.json
 //   4) `cargo update -w` 同步 Cargo.lock 中 5 个 mp-* 成员版本（不动外部依赖）
 // 用法：node scripts/version.mjs <版本号> [--dry-run]

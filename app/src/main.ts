@@ -6,6 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { detectLang, setLang, t, LANGS, type Lang } from "./i18n";
 
 type StatusSnapshot = {
@@ -617,6 +618,9 @@ async function bootstrapProfiles() {
 window.addEventListener("DOMContentLoaded", () => {
   renderStatic();
   void bootstrapProfiles();
+
+  // 版本号：读 tauri.conf.json（编译期入包），升版统一走 scripts/version.mjs
+  getVersion().then((v) => { $("appVersion").textContent = `v${v}`; }).catch(() => {});
 
   // 事件桥（Rust 长连接推送）
   void listen<StatusSnapshot>("vpn-status", (ev) => { connectingLocal = false; disconnectingLocal = false; applyStatus(ev.payload); });

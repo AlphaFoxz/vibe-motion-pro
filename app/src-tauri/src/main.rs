@@ -145,6 +145,12 @@ fn state_label(state: &str, lang: &str) -> &'static str {
     }
 }
 
+/// 托盘标题：产品名 + 版本 + 状态。版本唯一源是 tauri.conf.json
+/// （升版统一走 scripts/version.mjs），用户据托盘即可识别安装版本。
+fn tray_title(app: &AppHandle, label: &str) -> String {
+    format!("VibeMotionPro v{} — {}", app.package_info().version, label)
+}
+
 /// 状态变化：推事件给前端 + 同步托盘（图标/文案/菜单可用性） + 边沿通知与自动收起。
 fn handle_status(app: &AppHandle, snap: StatusSnapshot) {
     let state = app.state::<AppState>();
@@ -189,12 +195,9 @@ fn handle_status(app: &AppHandle, snap: StatusSnapshot) {
             if let Some(img) = tray_icon_for(&cur) {
                 let _ = ui.tray.set_icon(Some(img));
             }
-            let _ = ui
-                .tray
-                .set_tooltip(Some(format!("VibeMotionPro — {}", state_label(&cur, lang))));
-            let _ = ui
-                .status_item
-                .set_text(format!("VibeMotionPro — {}", state_label(&cur, lang)).as_str());
+            let title = tray_title(app, &state_label(&cur, lang));
+            let _ = ui.tray.set_tooltip(Some(title.clone()));
+            let _ = ui.status_item.set_text(title.as_str());
             let busy = matches!(cur.as_str(), "connecting" | "reconnecting");
             let _ = ui.connect_item.set_enabled(cur != "connected" && !busy);
             let _ = ui.disconnect_item.set_enabled(cur == "connected" || busy);
@@ -638,6 +641,7 @@ fn ui_hide_window(app: AppHandle) {
 /// 前端语言切换时同步托盘菜单文案。
 #[tauri::command]
 fn set_tray_texts(
+    app: AppHandle,
     state: State<'_, AppState>,
     lang: String,
     show: String,
@@ -660,7 +664,7 @@ fn set_tray_texts(
             // 状态行按当前状态刷新
             let cur = state.last_state.lock().unwrap().clone();
             ui.status_item
-                .set_text(format!("VibeMotionPro — {}", state_label(&cur, recognized)).as_str())
+                .set_text(tray_title(&app, &state_label(&cur, recognized)).as_str())
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -696,7 +700,7 @@ fn main() {
 
             // 托盘：三态图标 + 菜单（状态行禁用项 / 显示窗口 / 连接 / 断开 / 退出）
             let status_item =
-                MenuItem::with_id(&handle, "status-line", "VibeMotionPro — 未连接", false, None::<&str>)?;
+                MenuItem::with_id(&handle, "status-line", tray_title(&handle, "未连接"), false, None::<&str>)?;
             let show_item = MenuItem::with_id(&handle, "show", "显示主窗口", true, None::<&str>)?;
             let connect_item = MenuItem::with_id(&handle, "tray-connect", "连接…", true, None::<&str>)?;
             let disconnect_item =
@@ -713,7 +717,7 @@ fn main() {
                 .icon(tray_icon_for("disconnected").expect("embedded tray icon"))
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .tooltip("VibeMotionPro — 未连接")
+                .tooltip(tray_title(&handle, "未连接"))
                 .build(&handle)?;
 
             tray.on_menu_event(|app, event| match event.id().as_ref() {
