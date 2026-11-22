@@ -2,6 +2,19 @@
 
 本文件由 CI 在发布时依据 [约定式提交](https://www.conventionalcommits.org/zh-hans/) 自动生成，请勿手工编辑。
 
+## v0.1.3（2026-11-22）
+### ✨ 功能
+- **ui**: 标题与托盘显示版本号，升版自动跟随
+
+### 🐛 修复
+- **profile**: 用户名随 profile 持久化，修复 Linux 安装版不回填
+
+### 📚 文档
+- **changelog**: v0.1.2 自动更新改动日志
+
+### 🔧 杂项
+- update version to 0.1.3 in Cargo.toml, Cargo.lock, package.json, and tauri.conf.json
+
 ## v0.1.2（2026-11-22）
 ### scripts
 - Node 脚本统一为 ESM .mjs，新增跨平台升版脚本 version.mjs
