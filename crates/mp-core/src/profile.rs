@@ -12,6 +12,11 @@ pub struct Profile {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// 最后一次成功登录的用户名。非敏感，随 profile 持久化，UI 回填用
+    /// （不落 WebView localStorage：WebKitGTK 退出时可能丢，Linux 安装版
+    /// 实测用户名永不回填而 keyring 密码正常，2026-11）。
+    #[serde(default)]
+    pub username: String,
     #[serde(default)]
     pub tunnel_type: crate::session::TunnelType,
     #[serde(default)]
@@ -29,6 +34,7 @@ impl Profile {
             name: name.into(),
             host: host.into(),
             port: default_port(),
+            username: String::new(),
             tunnel_type: crate::session::TunnelType::Tcp,
             autoconnect: false,
         }
@@ -154,6 +160,7 @@ mod tests {
         assert_eq!(s.list().len(), 0); // 文件不存在 -> 空
         let mut p = Profile::new("p1", "Office", "vpn.example.com");
         p.autoconnect = true;
+        p.username = "example_user".into();
         s.add_or_update(p).unwrap();
 
         let s2 = ProfileStore::load(&path).unwrap();
@@ -161,7 +168,24 @@ mod tests {
         let p2 = s2.get("p1").unwrap();
         assert_eq!(p2.port, 443); // 默认端口
         assert_eq!(p2.tunnel_type, crate::session::TunnelType::Tcp);
+        assert_eq!(p2.username, "example_user"); // 用户名随 toml 往返
         assert!(s2.default_profile().unwrap().id == "p1"); // autoconnect 优先
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_toml_without_username_loads() {
+        // 旧版（username 入库前）写的 profiles.toml 不带该字段，serde default 兜底为空。
+        // 独立文件名：tmpdir 按 pid 共享，避免与 toml_roundtrip 并行竞争。
+        let dir = tmpdir();
+        let path = dir.join("legacy-profiles.toml");
+        std::fs::write(
+            &path,
+            "[[profile]]\nid = \"old\"\nname = \"Old\"\nhost = \"old.example.com\"\nport = 443\ntunnel_type = \"tcp\"\nautoconnect = false\n",
+        )
+        .unwrap();
+        let s = ProfileStore::load(&path).unwrap();
+        assert_eq!(s.get("old").unwrap().username, "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

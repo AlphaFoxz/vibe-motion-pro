@@ -409,6 +409,7 @@ fn to_msg(p: &Profile) -> ProfileMsg {
         name: p.name.clone(),
         host: p.host.clone(),
         port: p.port,
+        username: p.username.clone(),
         tunnel_type: format!("{:?}", p.tunnel_type).to_lowercase(),
         autoconnect: p.autoconnect,
     }
@@ -417,6 +418,7 @@ fn to_msg(p: &Profile) -> ProfileMsg {
 fn from_msg(m: &ProfileMsg) -> Profile {
     let mut p = Profile::new(m.id.clone(), m.name.clone(), m.host.clone());
     p.port = m.port;
+    p.username = m.username.clone();
     p.tunnel_type = match m.tunnel_type.as_str() {
         "udp" => TunnelType::Udp,
         "dtls" => TunnelType::Dtls,
@@ -816,6 +818,7 @@ mod tests {
                     name: "Branch".into(),
                     host: "b.example.com".into(),
                     port: 8443,
+                    username: "example_user".into(),
                     tunnel_type: "udp".into(),
                     autoconnect: false,
                 },
@@ -831,6 +834,7 @@ mod tests {
                 let p = profiles.iter().find(|p| p.id == "p2").unwrap();
                 assert_eq!(p.port, 8443);
                 assert_eq!(p.tunnel_type, "udp");
+                assert_eq!(p.username, "example_user"); // 用户名随 profile 往返
             }
             other => panic!("unexpected: {other:?}"),
         }

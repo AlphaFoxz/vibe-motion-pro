@@ -20,6 +20,7 @@ type Profile = {
   name: string;
   host: string;
   port: number;
+  username: string;
   tunnel_type: string;
   autoconnect: boolean;
 };
@@ -71,8 +72,11 @@ function esc(s: string): string {
 }
 
 // 凭据稳定键：host 归一（trim+小写）。profile 删除重建后 id 变、host 不变，
-// 用户名/密码按 id 优先、host 键兜底，避免凭据「丢失」。
-// 与 Rust 侧 vpn-pass:host:<host>（密码）对应；用户名落在 localStorage。
+// 密码按 id 优先、host 键兜底，避免凭据「丢失」。
+// 与 Rust 侧 vpn-pass:host:<host>（密码）对应。
+// 用户名现随 profile 持久化（daemon 侧 profiles.toml）；localStorage 仅作
+// 历史版本数据的迁移兜底——WebView localStorage 在 Linux 安装版上不可靠
+// （WebKitGTK 退出时可能不落盘，实测密码回填而用户名永远丢失，2026-11）。
 const hostKey = (host: string) => host.trim().toLowerCase();
 
 function savedUsername(id: string, host: string): string {
@@ -366,8 +370,9 @@ function selectProfile(id: string, withHint = false) {
   renderServerSelect();
   renderServerCards();
 
-  // 回填用户名 / 记住的密码（均按 id 优先、host 稳定键兜底）
-  ($("username") as HTMLInputElement).value = savedUsername(id, p.host);
+  // 回填用户名（profile 持久化优先，localStorage 旧数据兜底）/
+  // 记住的密码（keychain，按 id 优先、host 稳定键兜底）
+  ($("username") as HTMLInputElement).value = p.username || savedUsername(id, p.host);
   ($("password") as HTMLInputElement).value = "";
   ($("remember-pwd") as HTMLInputElement).checked = false;
   void (async () => {
@@ -453,6 +458,8 @@ async function saveEditor() {
   try {
     const p: Profile = {
       id, name, host, port, tunnel_type: tunnel,
+      // 编辑保留已记住的用户名；新建为空（连接成功后回写）
+      username: profiles.find((x) => x.id === id)?.username ?? "",
       autoconnect: auto || (editingId ? profiles.find((x) => x.id === id)?.autoconnect === true : false),
     };
     profiles = await invoke<Profile[]>("profile_add", { profile: p });
@@ -523,9 +530,14 @@ async function connect() {
   // 连接成功：记住凭据偏好
   if (selectedId) {
     const p = profiles.find((x) => x.id === selectedId);
-    localStorage.setItem(`mp_username:${selectedId}`, username);
-    // host 稳定键兜底：profile 重建（新 id）后用户名仍可回填
-    if (p) localStorage.setItem(`mp_username:host:${hostKey(p.host)}`, username);
+    // 用户名随 profile 持久化（daemon 侧落盘，跨平台可靠；localStorage 仅旧版兜底）
+    if (p && p.username !== username) {
+      try {
+        profiles = await invoke<Profile[]>("profile_add", { profile: { ...p, username } });
+      } catch {
+        console.warn("profile username upsert failed");
+      }
+    }
     const remember = ($("remember-pwd") as HTMLInputElement).checked;
     if (remember) {
       invoke("password_save", { profileId: selectedId, host: p?.host ?? "", password })
