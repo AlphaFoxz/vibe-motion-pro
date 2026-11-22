@@ -2,6 +2,23 @@
 
 本文件由 CI 在发布时依据 [约定式提交](https://www.conventionalcommits.org/zh-hans/) 自动生成，请勿手工编辑。
 
+## v0.1.2（2026-11-22）
+### scripts
+- Node 脚本统一为 ESM .mjs，新增跨平台升版脚本 version.mjs
+
+### ✨ 功能
+- replace version.sh with version.mjs for version management
+
+### 🐛 修复
+- 残留旧产品名 MotionPro 统一改为 VibeMotionPro（页面标题/品牌名/Release 标题）
+- release 构建 GUI 子系统隐藏控制台窗口；deb 增加 postrm purge 清理
+
+### 📚 文档
+- **changelog**: v0.1.1 自动更新改动日志
+
+### 🔧 杂项
+- update version to 0.1.2 in Cargo.toml, package.json, and tauri.conf.json
+
 ## v0.1.1（2026-11-19）
 ### ⚡ 性能
 - **ui**: 首连失败立即拉起 daemon，消除启动时 UAC 前的数秒等待
