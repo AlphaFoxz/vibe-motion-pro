@@ -36,7 +36,8 @@ scripts/       抓包解析、图标生成、Linux/musl 测试与 WSL 冒烟等�
 - [x] 阶段2：协议帧格式逆向（Ghidra T1-T7 全部完成）→ 控制通道（rustls TLS + AAA 登录）与
       数据面（/vpntunnel 握手 + 配置帧 + 转发泵 + keepalive）均已实现并真机调通；
       tun 数据面 + 路由/DNS 接管（NetBackend 三平台策略）
-- [x] 阶段3：Tauri UI 双视图重构 + 托盘 + 单连接多路复用 IPC + keychain 记住密码 + i18n
+- [x] 阶段3：Tauri UI 双视图重构 + 托盘 + 单连接多路复用 IPC + keychain 记住密码 + i18n；
+      后续加入惰性日志页（守护进程自启动以来的日志；不看日志时不做任何额外工作）
 - [x] 阶段4（部分）：三平台打包 CI、Linux deb 真机验证、daemon 随应用分发
       （win=NSIS sidecar UAC / linux=systemd unit，见 docs/plan-release.md）
 - [ ] 与原版对拍验证、功能清单逐项对齐、macOS 分发、验证发布

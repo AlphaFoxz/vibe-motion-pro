@@ -110,11 +110,40 @@
 
           <div id="server-cards"></div>
         </section>
+
+        <!-- 日志视图：守护进程 / 界面进程自启动以来的日志（惰性：仅本视图激活时拉取） -->
+        <section id="view-logs" class="view">
+          <div class="log-head">
+            <div class="log-title-row">
+              <span class="log-title" id="logs-title"></span>
+              <button id="log-copy" class="chip-btn"><span id="log-copy-label"></span></button>
+            </div>
+            <div class="log-status" id="log-status"></div>
+            <div class="log-filters">
+              <div class="seg" id="log-level-seg">
+                <button data-level="all" class="on"><span id="log-level-all"></span></button>
+                <button data-level="warn"><span id="log-level-warn"></span><i class="cnt warn hidden" id="log-cnt-warn"></i></button>
+                <button data-level="error"><span id="log-level-error"></span><i class="cnt error hidden" id="log-cnt-error"></i></button>
+              </div>
+              <div class="log-search">
+                <input id="log-search" spellcheck="false" autocomplete="off" />
+                <button id="log-search-clear" class="ghost-ico hidden" title="✕">✕</button>
+              </div>
+            </div>
+          </div>
+          <div class="log-scroll" id="log-scroll">
+            <div id="log-list"></div>
+            <div id="log-empty" class="log-empty hidden"></div>
+          </div>
+          <button id="log-jump" class="log-jump hidden"></button>
+          <div id="log-toast" class="log-toast hidden"></div>
+        </section>
       </main>
 
       <nav id="tabbar">
         <button class="tab active" data-tab="connect"><span class="tab-ico">⬡</span><span id="tab-connect-label"></span></button>
         <button class="tab" data-tab="servers"><span class="tab-ico">▤</span><span id="tab-servers-label"></span></button>
+        <button class="tab" data-tab="logs"><span class="tab-ico">≡</span><span id="tab-logs-label"></span></button>
       </nav>
     </div>
     <script type="module" src="./src/main.ts"></script>

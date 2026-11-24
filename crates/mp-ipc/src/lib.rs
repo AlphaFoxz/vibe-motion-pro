@@ -7,6 +7,7 @@ use thiserror::Error;
 use crate::status::StatusSnapshot;
 
 pub mod codec;
+pub mod log;
 pub mod profile;
 pub mod status;
 pub mod transport;
@@ -44,6 +45,10 @@ pub enum Request {
     ListProfiles,
     AddProfile { profile: crate::profile::ProfileMsg },
     RemoveProfile { profile_id: String },
+    /// 拉取环形日志缓冲里 `seq >= from` 的行（见 [`crate::log`]）。
+    /// 永不触碰守护进程的状态锁；作为连接的**首个请求**时，该连接成为
+    /// 专门的日志连接（见 `mp_daemon::handle_client`）。
+    LogTail { epoch: u64, from: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -53,6 +58,7 @@ pub enum Response {
     StatusUpdate { status: StatusSnapshot },
     Session { session_id: Option<String> },
     Profiles { profiles: Vec<crate::profile::ProfileMsg> },
+    LogTail(crate::log::LogBatch),
     Ok,
     Error { message: String },
 }

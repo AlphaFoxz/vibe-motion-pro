@@ -373,13 +373,18 @@ fn url_port(loc: &str) -> Option<u16> {
     port.parse().ok()
 }pub mod netloop;
 use mp_ipc::codec::{recv_request, send_response};
+use mp_ipc::log::LogRing;
 use mp_ipc::profile::ProfileMsg;
 use mp_ipc::status::StatusSnapshot;
 use mp_ipc::{Request, Response};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, Mutex};
+
+/// 日志连接的空闲断开时间。前端离开日志页会主动断开，这里兜底 UI 崩溃/重载：
+/// 无人轮询的日志连接不该在守护进程里常驻。
+const LOG_CONN_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 主循环/连接处理心跳计数（供 main.rs 的冻结看门狗读取）。
 /// 每秒 +1；15s 不动 → 运行时冻结，看门狗抓栈后自杀。
@@ -547,6 +552,10 @@ pub fn handle_request(state: &mut DaemonState, req: &Request) -> Response {
             // 异步流程，由 handle_conn 的 handle_connect 处理；同步路径直接报错
             Response::Error { message: "connect requires async handler".into() }
         }
+        Request::LogTail { .. } => {
+            // 由 handle_conn 在取状态锁之前分流；同步路径直接报错
+            Response::Error { message: "log_tail requires connection handler".into() }
+        }
         Request::Stop => {
             // 关闭网卡（回滚路由/DNS）与隧道泵（异步 shutdown 后台执行，不阻塞响应）
             if let Some(mut tun) = state.active_tun.take() {
@@ -633,53 +642,125 @@ async fn handle_connect(
     }
 }
 
-/// 处理一条连接直到对端关闭；由调用方 spawn 为独立任务，
+/// 新连接的入口（由调用方 spawn 为独立任务）：预读首个请求并据此分流——
+/// [`Request::LogTail`] → 日志连接（[`log_conn`]）；其余 → 控制连接
+/// （[`handle_conn`]）。
+pub async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
+    state: Arc<Mutex<DaemonState>>,
+    logs: Arc<LogRing>,
+    stream: S,
+) -> anyhow::Result<()> {
+    use mp_ipc::IpcError;
+    // 持久 BufReader：跨 select 迭代保留缓冲字节，避免丢包卡死
+    let mut stream = tokio::io::BufReader::new(stream);
+    let first = match recv_request(&mut stream).await {
+        Ok(req) => req,
+        Err(IpcError::Closed) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    match first {
+        Request::LogTail { epoch, from } => log_conn(logs, stream, epoch, from).await,
+        _ => handle_conn(state, logs, stream, Some(first)).await,
+    }
+}
+
+/// 日志连接：只应答 LogTail，直到对端关闭或空闲超时。**不取状态锁、不订阅
+/// 状态广播**——控制连接上的 Connect 会把状态锁一直持到 120s，日志查看必须
+/// 与它无关（「边连接边看日志」正是日志页最主要的用法）。
+async fn log_conn<S: AsyncBufRead + AsyncWrite + Unpin>(
+    logs: Arc<LogRing>,
+    stream: S,
+    epoch: u64,
+    from: u64,
+) -> anyhow::Result<()> {
+    log_conn_idle(logs, stream, epoch, from, LOG_CONN_IDLE).await
+}
+
+/// [`log_conn`] 本体；空闲时长单列出来便于测试。
+async fn log_conn_idle<S: AsyncBufRead + AsyncWrite + Unpin>(
+    logs: Arc<LogRing>,
+    mut stream: S,
+    mut epoch: u64,
+    mut from: u64,
+    idle: std::time::Duration,
+) -> anyhow::Result<()> {
+    use mp_ipc::IpcError;
+    loop {
+        send_response(&Response::LogTail(logs.tail(epoch, from)), &mut stream).await?;
+        match tokio::time::timeout(idle, recv_request(&mut stream)).await {
+            Ok(Ok(Request::LogTail { epoch: e, from: f })) => (epoch, from) = (e, f),
+            Ok(Ok(_)) => send_response(
+                &Response::Error { message: "log connection only serves log_tail".into() },
+                &mut stream,
+            )
+            .await?,
+            Ok(Err(IpcError::Closed)) => return Ok(()),
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_elapsed) => return Ok(()), // 空闲超时：无人查看
+        }
+    }
+}
+
+/// 控制连接：处理请求直到对端关闭；由调用方 spawn 为独立任务，
 /// 主循环因此能继续 accept 与 1s tick（心跳）——否则持久 UI 连接会
 /// 让 ticker 分支饿死、冻结看门狗误判自杀（2026-11 真机踩坑）。
 /// 同时 select 广播通道，向客户端推送 StatusUpdate（对齐原版 cmd 1 推送）。
 ///
 /// `state` 为跨任务共享；心跳分支不取锁，长连接认证期间（锁被长时间持有）
 /// FREEZE_TICK 仍每秒前进，看门狗不会误杀。
-pub async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(
+///
+/// `first` 是 [`handle_client`] 预读出的首请求，有则先处理。
+async fn handle_conn<S: AsyncBufRead + AsyncWrite + Unpin>(
     state: Arc<Mutex<DaemonState>>,
-    stream: S,
+    logs: Arc<LogRing>,
+    mut stream: S,
+    first: Option<Request>,
 ) -> anyhow::Result<()> {
     use mp_ipc::IpcError;
     let mut rx = state.lock().await.status_tx.subscribe();
-    // 持久 BufReader：跨 select 迭代保留缓冲字节，避免丢包卡死
-    let mut stream = tokio::io::BufReader::new(stream);
     // 连接内独立心跳：仅推进 FREEZE_TICK，不碰状态锁
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut first = first;
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 FREEZE_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            req = recv_request(&mut stream) => {
+            // 首请求已预读（用于分流），优先消费
+            req = async {
+                match first.take() {
+                    Some(req) => Ok(req),
+                    None => recv_request(&mut stream).await,
+                }
+            } => {
                 let req = match req {
                     Ok(r) => r,
                     Err(IpcError::Closed) => return Ok(()),
                     Err(e) => return Err(e.into()),
                 };
-                let resp = {
-                    let mut st = state.lock().await;
-                    match req {
-                        Request::Connect { host, port, username, password, code } => {
-                            // 总超时兜底：认证链路各阶段理应自带超时，但任何一处
-                            // 遗漏都会让状态锁被无限期持有（其余请求全部排队）。
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(120),
-                                handle_connect(&mut st, &host, port, &username, &password, &code),
-                            )
-                            .await
-                            {
-                                Ok(resp) => resp,
-                                Err(_) => Response::Error {
-                                    message: "connect 整体超时（120s）".into(),
-                                },
-                            }
+                let resp = match req {
+                    // 日志读取走环形缓冲自己的锁，不进状态锁（Connect 期间被长期持有）。
+                    // 控制连接在 Connect 进行时不读请求，UI 的日志页因此另开日志连接。
+                    Request::LogTail { epoch, from } => Response::LogTail(logs.tail(epoch, from)),
+                    Request::Connect { host, port, username, password, code } => {
+                        // 总超时兜底：认证链路各阶段理应自带超时，但任何一处
+                        // 遗漏都会让状态锁被无限期持有（其余请求全部排队）。
+                        let mut st = state.lock().await;
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(120),
+                            handle_connect(&mut st, &host, port, &username, &password, &code),
+                        )
+                        .await
+                        {
+                            Ok(resp) => resp,
+                            Err(_) => Response::Error {
+                                message: "connect 整体超时（120s）".into(),
+                            },
                         }
-                        other => handle_request(&mut st, &other),
+                    }
+                    other => {
+                        let mut st = state.lock().await;
+                        handle_request(&mut st, &other)
                     }
                 };
                 send_response(&resp, &mut stream).await?;
@@ -703,6 +784,7 @@ pub fn poll_interval_secs() -> u64 {
 mod tests {
     use super::*;
     use mp_ipc::codec::{recv_response, send_request};
+    use mp_ipc::log::{Level, LogBatch};
 
     fn state() -> DaemonState {
         let mut s = DaemonState::new(ProfileStore::new());
@@ -716,7 +798,7 @@ mod tests {
         let mut client = tokio::io::BufReader::new(client);
         let st = Arc::new(Mutex::new(state()));
 
-        let srv = tokio::spawn(handle_conn(st, server));
+        let srv = tokio::spawn(handle_client(st, Arc::new(LogRing::new()), server));
 
         // 普通请求往返
         send_request(&Request::Status, &mut client).await.unwrap();
@@ -745,6 +827,142 @@ mod tests {
 
         drop(client);
         srv.await.unwrap().unwrap();
+    }
+
+    // ---------- 日志连接 ----------
+
+    async fn log_roundtrip<S: AsyncBufRead + AsyncWrite + Unpin>(
+        client: &mut S,
+        epoch: u64,
+        from: u64,
+    ) -> LogBatch {
+        send_request(&Request::LogTail { epoch, from }, client).await.unwrap();
+        match recv_response(client).await.unwrap() {
+            Response::LogTail(batch) => batch,
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    fn texts(batch: &LogBatch) -> Vec<&str> {
+        batch.lines.iter().map(|l| l.msg.as_str()).collect()
+    }
+
+    /// 核心保证：别的连接正在 Connect（状态锁被一直持有）时，日志连接照常应答。
+    /// 否则「边连接边看日志」会一直卡到 Connect 结束。
+    #[tokio::test]
+    async fn log_connection_is_served_while_state_lock_is_held() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
+        let st = Arc::new(Mutex::new(state()));
+        let logs = Arc::new(LogRing::new());
+        let srv = tokio::spawn(handle_client(st.clone(), logs.clone(), server));
+
+        // 模拟进行中的 Connect：状态锁被另一个任务一直持有
+        let held = st.lock().await;
+        logs.push(Level::Info, "mp_daemon", "listening".into());
+
+        let batch = log_roundtrip(&mut client, 0, 0).await;
+        assert_eq!(batch.epoch, logs.epoch(), "新读者（游标 0）拿到本进程纪元");
+        assert_eq!(texts(&batch), ["listening"]);
+
+        logs.push(Level::Warn, "mp_daemon", "connect failed".into());
+        let batch = log_roundtrip(&mut client, batch.epoch, batch.next).await;
+        assert_eq!(texts(&batch), ["connect failed"], "增量：只返回上次游标之后的行");
+
+        drop(held);
+        drop(client);
+        srv.await.unwrap().unwrap();
+    }
+
+    /// 日志连接不订阅状态广播：状态变化不会往它身上推 StatusUpdate。
+    #[tokio::test]
+    async fn log_connection_gets_no_status_pushes() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
+        let st = Arc::new(Mutex::new(state()));
+        let logs = Arc::new(LogRing::new());
+        let srv = tokio::spawn(handle_client(st.clone(), logs.clone(), server));
+
+        let batch = log_roundtrip(&mut client, 0, 0).await; // 已分流为日志连接
+        {
+            let mut s = st.lock().await;
+            s.tick_broadcast(&mut None); // 产生一次状态广播
+        }
+        // 下一帧必须仍是 LogTail 应答；若误订阅，这里会先收到 StatusUpdate
+        let again = log_roundtrip(&mut client, batch.epoch, batch.next).await;
+        assert!(again.lines.is_empty());
+
+        drop(client);
+        srv.await.unwrap().unwrap();
+    }
+
+    /// 控制连接中途也能读日志（同一条不取状态锁的快路径），脚本/工具可直接用。
+    #[tokio::test]
+    async fn control_connection_can_read_logs_mid_stream() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
+        let st = Arc::new(Mutex::new(state()));
+        let logs = Arc::new(LogRing::new());
+        let srv = tokio::spawn(handle_client(st, logs.clone(), server));
+
+        send_request(&Request::Status, &mut client).await.unwrap();
+        assert!(matches!(recv_response(&mut client).await.unwrap(), Response::Status { .. }));
+
+        logs.push(Level::Info, "mp_daemon", "mid-stream".into());
+        let batch = log_roundtrip(&mut client, logs.epoch(), 0).await;
+        assert_eq!(texts(&batch), ["mid-stream"]);
+
+        drop(client);
+        srv.await.unwrap().unwrap();
+    }
+
+    /// 无人轮询的日志连接在空闲超时后由守护进程主动断开：
+    /// 「没人看日志」最终收敛为守护进程里不剩任何日志连接任务。
+    #[tokio::test]
+    async fn idle_log_connection_is_closed_by_daemon() {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
+        let idle = std::time::Duration::from_millis(50);
+        let srv = tokio::spawn(log_conn_idle(
+            Arc::new(LogRing::new()),
+            tokio::io::BufReader::new(server),
+            0,
+            0,
+            idle,
+        ));
+
+        // 契约：首请求已由 handle_client 预读，所以这里先直接收到它的应答
+        match recv_response(&mut client).await.unwrap() {
+            Response::LogTail(batch) => assert!(batch.lines.is_empty()),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // 之后对端不再发请求：空闲超时后连接被关闭，读到 EOF 而不是永远挂着
+        use tokio::io::AsyncBufReadExt as _;
+        let mut line = String::new();
+        let n = tokio::time::timeout(idle * 20, client.read_line(&mut line))
+            .await
+            .expect("空闲超时后连接应被关闭")
+            .unwrap();
+        assert_eq!(n, 0);
+        srv.await.unwrap().unwrap();
+    }
+
+    /// 首行不是 JSON：连接被关闭而不是挂起。
+    #[tokio::test]
+    async fn malformed_first_line_closes_connection() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mut client, server) = tokio::io::duplex(4096);
+        let st = Arc::new(Mutex::new(state()));
+        let srv = tokio::spawn(handle_client(st, Arc::new(LogRing::new()), server));
+
+        client.write_all(b"not json\n").await.unwrap();
+        let mut buf = Vec::new();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), client.read_to_end(&mut buf))
+            .await
+            .expect("连接应被及时关闭")
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(srv.await.unwrap().is_err());
     }
 
     #[tokio::test]
@@ -809,7 +1027,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
         let st = Arc::new(Mutex::new(state()));
-        let srv = tokio::spawn(handle_conn(st, server));
+        let srv = tokio::spawn(handle_client(st, Arc::new(LogRing::new()), server));
 
         send_request(
             &Request::AddProfile {
@@ -1005,7 +1223,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
         let st = Arc::new(Mutex::new(state()));
-        let srv = tokio::spawn(handle_conn(st, server));
+        let srv = tokio::spawn(handle_client(st, Arc::new(LogRing::new()), server));
 
         // 免浏览器登录连接（用户名/密码/动态密保）
         send_request(
@@ -1052,7 +1270,7 @@ mod tests {
         let (client, server) = tokio::io::duplex(4096);
         let mut client = tokio::io::BufReader::new(client);
         let st = Arc::new(Mutex::new(state()));
-        let srv = tokio::spawn(handle_conn(st, server));
+        let srv = tokio::spawn(handle_client(st, Arc::new(LogRing::new()), server));
         send_request(
             &Request::Connect {
                 host: "127.0.0.1".into(),

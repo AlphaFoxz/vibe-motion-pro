@@ -3,11 +3,14 @@
 //   - 状态经 "vpn-status" 事件推送（1s 广播，替代旧 3s 轮询）
 //   - 链路存活经 "vpn-link" 事件（守护进程未运行时给出提示）
 //   - "tray-connect"：托盘「连接」唤起主界面并预选默认服务器
+// 「日志」Tab 不走这条连接，按需拉取，见 logs.ts。
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { detectLang, setLang, t, LANGS, type Lang } from "./i18n";
+import { initLogs, logsClose, logsOpen, logsPoke, logsRenderStatic } from "./logs";
+import { $, esc, fmt } from "./util";
 
 type StatusSnapshot = {
   state: string;
@@ -26,7 +29,7 @@ type Profile = {
   autoconnect: boolean;
 };
 
-const $ = (id: string) => document.getElementById(id)!;
+type Tab = "connect" | "servers" | "logs";
 
 // Linux 上 daemon 由 systemd 服务承担（plan-release.md P2），离线提示走服务引导文案
 const isLinux = navigator.userAgent.includes("Linux");
@@ -34,6 +37,7 @@ const isLinux = navigator.userAgent.includes("Linux");
 // ---------- 全局状态 ----------
 
 let lang: Lang = detectLang();
+let activeTab: Tab = "connect";
 let profiles: Profile[] = [];
 let selectedId: string | null = localStorage.getItem("mp_last_profile") || null;
 let status: StatusSnapshot = { state: "disconnected", rtt_ms: null, server_ip: null, client_ip: null };
@@ -46,10 +50,6 @@ let editingId: string | null = null; // 编辑器打开时的 profile id；null 
 let deletingId: string | null = null; // 两步删除确认
 
 // ---------- 工具 ----------
-
-function fmt(f: string, ...args: string[]): string {
-  return f.replace(/\{(\w+)\}/g, (_m, _k) => args.shift() ?? _m);
-}
 
 function tunnelLabel(tt: string): string {
   const d = t(lang);
@@ -66,10 +66,6 @@ function fmtDuration(ms: number): string {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
   const two = (n: number) => String(n).padStart(2, "0");
   return h > 0 ? `${h}:${two(m)}:${two(ss)}` : `${two(m)}:${two(ss)}`;
-}
-
-function esc(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 // 凭据稳定键：host 归一（trim+小写）。profile 删除重建后 id 变、host 不变，
@@ -121,7 +117,14 @@ function renderStatic() {
     "btn-editor-cancel": d.cancel,
     "tab-connect-label": d.tabConnect,
     "tab-servers-label": d.tabServers,
+    "tab-logs-label": d.tabLogs,
     "offline-banner": isLinux ? d.errOfflineLinux : d.errOffline,
+    // 日志页（动态文案由 logsRenderStatic 刷新）
+    "logs-title": d.logTitle,
+    "log-copy-label": d.logCopy,
+    "log-level-all": d.logLevelAll,
+    "log-level-warn": d.logLevelWarn,
+    "log-level-error": d.logLevelError,
   };
   for (const [id, text] of Object.entries(map)) {
     const el = $(id);
@@ -132,6 +135,8 @@ function renderStatic() {
   ($("username") as HTMLInputElement).placeholder = d.username;
   ($("password") as HTMLInputElement).placeholder = d.password;
   ($("otp") as HTMLInputElement).placeholder = "——6 位——";
+  ($("log-search") as HTMLInputElement).placeholder = d.logSearch;
+  $("log-copy").title = d.logCopy;
 
   const sel = $("lang-select") as HTMLSelectElement;
   sel.innerHTML = LANGS.map((l) => `<option value="${l.value}">${l.label}</option>`).join("");
@@ -141,6 +146,7 @@ function renderStatic() {
   renderServerSelect();
   renderServerCards();
   syncTrayTexts();
+  logsRenderStatic();
 }
 
 function syncTrayTexts() {
@@ -571,8 +577,9 @@ function applyStatus(snap: StatusSnapshot) {
     connectedAt = Date.now();
     startTicker();
     if (selectedId) localStorage.setItem(`mp_last_connected:${selectedId}`, String(Date.now()));
-    // 自动收起到托盘（可在设置勾选关闭）
-    if (localStorage.getItem("mp_autohide") !== "0") {
+    // 自动收起到托盘（可在设置勾选关闭）。停在日志页时不收：用户正看着，
+    // 多半是在观察这次连接——Rust 侧的同名逻辑见 autohide_allowed()
+    if (localStorage.getItem("mp_autohide") !== "0" && activeTab !== "logs") {
       setTimeout(() => invoke("ui_hide_window").catch(() => {}), 1200);
     }
   }
@@ -583,6 +590,7 @@ function applyStatus(snap: StatusSnapshot) {
   if (snap.state === "disconnected") { connectingLocal = false; disconnectingLocal = false; }
   renderStatusUI();
   renderServerCards();
+  logsPoke(); // 状态刚变过，日志页若开着就不等下一个 1s 节拍
 }
 
 function setOffline(v: boolean) {
@@ -597,12 +605,18 @@ function setOffline(v: boolean) {
 
 // ---------- 视图切换 ----------
 
-function switchTab(tab: "connect" | "servers") {
+function switchTab(tab: Tab) {
+  activeTab = tab;
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
   $(`view-${tab}`).classList.add("active");
+  // 日志页独占主区（列表自己滚动）；其余视图沿用 main 的整体滚动
+  document.querySelector("main")!.classList.toggle("fill", tab === "logs");
   document.querySelectorAll(".tab").forEach((tb) => {
     tb.classList.toggle("active", (tb as HTMLElement).dataset.tab === tab);
   });
+  // 日志页惰性：进入才开始拉取，离开即停
+  if (tab === "logs") logsOpen();
+  else logsClose();
 }
 
 // ---------- 初始化 ----------
@@ -616,6 +630,7 @@ async function bootstrapProfiles() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  initLogs(() => lang);
   renderStatic();
   void bootstrapProfiles();
 
@@ -630,6 +645,7 @@ window.addEventListener("DOMContentLoaded", () => {
   void listen<boolean>("vpn-link", (ev) => {
     setOffline(!ev.payload);
     if (ev.payload && profiles.length === 0) void bootstrapProfiles();
+    logsPoke(); // 链路恢复：守护进程可能刚重启，日志页若开着立即重连取历史
   });
   // daemon 自动拉起结果：ok 不打扰（连接随后自动恢复）；被拒/失败给出指引
   void listen<{ kind: string; detail?: string }>("daemon-spawn", (ev) => {
@@ -661,7 +677,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // Tab 切换
   document.querySelectorAll(".tab").forEach((tb) => {
-    tb.addEventListener("click", () => switchTab((tb as HTMLElement).dataset.tab as "connect" | "servers"));
+    tb.addEventListener("click", () => switchTab((tb as HTMLElement).dataset.tab as Tab));
   });
 
   // 服务器选择器

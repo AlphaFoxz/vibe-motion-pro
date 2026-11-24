@@ -2,9 +2,11 @@
 //! - IPC server（127.0.0.1:62000，可用 MP_IPC_ADDR 覆盖）
 //! - 1 秒状态轮询广播（对齐原版 vpnd detect_vni_status_thread）
 //! - Profile 持久化（MP_PROFILES 路径，默认 <config>/profiles.toml）
+//! - 日志：stdout（RUST_LOG 控制）+ 进程内环形缓冲（UI「日志」页按需读取，见 mp_ipc::log）
 
 use mp_core::profile::ProfileStore;
-use mp_daemon::{handle_conn, poll_interval_secs, DaemonState, FREEZE_TICK};
+use mp_daemon::{handle_client, poll_interval_secs, DaemonState, FREEZE_TICK};
+use mp_ipc::log::LogRing;
 use mp_ipc::transport::TcpServer;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -108,9 +110,10 @@ fn detach_console_if_managed(managed: bool) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // 日志两个去向：stdout（RUST_LOG 控制）+ 进程内环形缓冲（UI「日志」页按需读取）。
+    // 环形缓冲必须赶在任何 tracing 调用之前装好，才称得上「自启动以来」。
+    let log_ring = Arc::new(LogRing::new());
+    mp_ipc::log::init(log_ring.clone());
 
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(a) => a,
@@ -208,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
             conn = server.accept() => {
                 // accept 失败绝不退出进程（真机曾出现 logout 后静默退出）：
                 // 记日志、退避后继续服务
-                let mut conn = match conn {
+                let conn = match conn {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::error!("ipc accept failed: {e}");
@@ -217,8 +220,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 let st = state.clone();
+                let logs = log_ring.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_conn(st, &mut conn).await {
+                    if let Err(e) = handle_client(st, logs, conn).await {
                         tracing::warn!("connection error: {e}");
                     }
                 });

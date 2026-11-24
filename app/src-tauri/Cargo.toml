@@ -14,7 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+# tracing subscriber（stdout + 环形日志缓冲）统一由 mp_ipc::log::init 安装
 # OS 凭据管理器（Windows 凭据管理器 / macOS Keychain / Linux Secret Service）
 keyring = { version = "3", default-features = false, features = [
     "windows-native",

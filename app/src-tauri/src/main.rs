@@ -10,20 +10,24 @@
 //!
 //! 状态变化通过 `vpn-status` 事件推给前端（替代旧轮询）；
 //! 托盘三态图标 / 菜单 / 通知 / 连接后自动收起窗口都在 Rust 侧完成。
+//!
+//! 「日志」页是唯一的例外，不复用控制连接：它另开一条只在自己打开期间
+//! 存在的日志连接（见「日志页」一节）。
 
 use mp_ipc::codec::{recv_response, send_request};
+use mp_ipc::log::{LogBatch, LogRing};
 use mp_ipc::profile::ProfileMsg;
 use mp_ipc::status::StatusSnapshot;
 use mp_ipc::transport::tcp_connect;
 use mp_ipc::{Request, Response};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tokio::io::{BufReader, ReadHalf, WriteHalf};
 use tokio::sync::oneshot;
@@ -105,10 +109,20 @@ struct AppState {
     last_state: Mutex<String>,
     /// 托盘菜单语言（"zh-CN" | "en" | "ja"），由前端 set_tray_texts 同步
     tray_lang: Mutex<&'static str>,
+    /// 「日志」页：本进程环形日志 + 按需建立的守护进程日志连接
+    logs: Arc<LogState>,
 }
 
 /// 连接成功后自动收起窗口（原版 ShowUIAfterConnected 语义的镜像）。
 static AUTO_HIDE: AtomicBool = AtomicBool::new(true);
+
+/// 日志页打开中：自动收起暂不执行——用户正盯着窗口看日志。
+static LOG_VIEW_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// 连接成功后是否自动收起：偏好开启，且用户没停在日志页。
+fn autohide_allowed() -> bool {
+    AUTO_HIDE.load(Ordering::Relaxed) && !LOG_VIEW_OPEN.load(Ordering::Relaxed)
+}
 
 // ---------- 托盘图标资源（scripts/gen_brand_icons.mjs 生成） ----------
 
@@ -166,11 +180,11 @@ fn handle_status(app: &AppHandle, snap: StatusSnapshot) {
                 .title("VibeMotionPro")
                 .body("VPN 已连接 · Connected")
                 .show();
-            if AUTO_HIDE.load(Ordering::Relaxed) {
+            if autohide_allowed() {
                 let a = app.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(900)).await;
-                    if AUTO_HIDE.load(Ordering::Relaxed) {
+                    if autohide_allowed() {
                         if let Some(w) = a.get_webview_window("main") {
                             let _ = w.hide();
                         }
@@ -538,6 +552,155 @@ async fn profile_remove(state: State<'_, AppState>, profile_id: String) -> Resul
     }
 }
 
+// ---------- 日志页（惰性） ----------
+//
+// 「日志」页显示本进程与守护进程自启动以来的日志（mp_ipc::log 环形缓冲）。
+// 没人看日志时这里没有任何活动：无后台任务、无定时器、不连接守护进程。前端
+// 只在日志页激活期间每秒调一次 log_tail，离开时调 log_close 断开日志连接。
+//
+// 守护进程日志走**独立的第二条连接**，不复用控制连接：控制连接上的 Connect
+// 会让守护进程的连接循环忙到 120s，同连接上的日志请求只能排在它后面——而
+// 「边连接边看日志」恰恰是日志页最主要的用法。守护进程侧见 mp_daemon 的
+// handle_client / log_conn。
+
+/// 日志连接的建连 / 请求超时。
+const LOG_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const LOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 前端回传的读取游标（上次各路响应里的 epoch / next），透传给环形缓冲。
+#[derive(Default, Debug, PartialEq, Deserialize)]
+struct LogCursor {
+    #[serde(default)]
+    ui_from: u64,
+    #[serde(default)]
+    daemon_epoch: u64,
+    #[serde(default)]
+    daemon_from: u64,
+}
+
+/// 守护进程日志的读取结果（`state` 作判别字段，前端据此渲染状态行）。
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum DaemonLog {
+    Online(LogBatch),
+    /// 连不上：守护进程未运行
+    Offline,
+    /// 连上了却拿不到日志：版本过旧（不认识 log_tail）或无响应
+    Incompatible,
+}
+
+#[derive(Serialize)]
+struct LogTailOut {
+    /// 窗口不可见（收起托盘 / 最小化）：本轮什么都没读，前端保持原样
+    paused: bool,
+    ui: Option<LogBatch>,
+    daemon: Option<DaemonLog>,
+}
+
+/// 日志页专用的守护进程连接。
+struct LogLink {
+    wr: TcpWr,
+    rd: BufReader<TcpRd>,
+}
+
+impl LogLink {
+    async fn connect(addr: &str) -> Result<Self, String> {
+        let stream = tokio::time::timeout(LOG_CONNECT_TIMEOUT, tcp_connect(addr))
+            .await
+            .map_err(|_| "连接守护进程超时".to_string())?
+            .map_err(|e| e.to_string())?;
+        let (rd, wr) = tokio::io::split(stream);
+        Ok(Self { wr, rd: BufReader::new(rd) })
+    }
+
+    async fn tail(&mut self, epoch: u64, from: u64) -> Result<LogBatch, String> {
+        send_request(&Request::LogTail { epoch, from }, &mut self.wr)
+            .await
+            .map_err(|e| e.to_string())?;
+        let resp = tokio::time::timeout(LOG_REQUEST_TIMEOUT, recv_response(&mut self.rd))
+            .await
+            .map_err(|_| "守护进程响应超时".to_string())?
+            .map_err(|e| e.to_string())?;
+        match resp {
+            // 日志连接只应答 LogTail；别的应答说明对端不是预期的那套协议
+            Response::LogTail(batch) => Ok(batch),
+            _ => Err(format!("unexpected response: {resp:?}")),
+        }
+    }
+}
+
+struct LogState {
+    /// 本进程（UI）的环形日志
+    ring: Arc<LogRing>,
+    /// 守护进程日志连接；仅日志页打开期间存在。tokio Mutex：跨 .await 持有。
+    link: tokio::sync::Mutex<Option<LogLink>>,
+}
+
+impl LogState {
+    /// 拉取守护进程日志增量。连接按需建立、出错即丢弃；失败后原地重连**一次**
+    /// 再判——守护进程刚重启时旧连接已死、新进程已在监听，这样不必给前端闪一下
+    /// 「无响应」；重连仍失败才是真的离线。
+    async fn daemon_tail(&self, addr: &str, epoch: u64, from: u64) -> DaemonLog {
+        let mut guard = self.link.lock().await;
+        let mut failure = None;
+        for _ in 0..2 {
+            if guard.is_none() {
+                match LogLink::connect(addr).await {
+                    Ok(link) => *guard = Some(link),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "daemon log link connect failed");
+                        return DaemonLog::Offline;
+                    }
+                }
+            }
+            let link = guard.as_mut().expect("连接刚建立或沿用上一轮");
+            match link.tail(epoch, from).await {
+                Ok(batch) => return DaemonLog::Online(batch),
+                Err(e) => {
+                    failure = Some(e);
+                    // 任何一步失败都视作连接已坏：丢弃，下一轮（或下面的重连）重来
+                    *guard = None;
+                }
+            }
+        }
+        let e = failure.expect("两轮都失败才会走到这里");
+        tracing::debug!(error = %e, "daemon log link failed twice");
+        DaemonLog::Incompatible
+    }
+}
+
+/// 日志页的轮询入口（仅日志页打开期间被前端每秒调用）。
+#[tauri::command]
+async fn log_tail(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    cursor: Option<LogCursor>,
+) -> Result<LogTailOut, String> {
+    LOG_VIEW_OPEN.store(true, Ordering::Relaxed);
+    let cursor = cursor.unwrap_or_default();
+    // 窗口不可见 = 用户没在看：不读环形缓冲、不碰守护进程。此时守护进程侧的
+    // 日志连接因无人轮询而空闲断开，恢复可见后下一轮自动重连。
+    let visible = window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false);
+    if !visible {
+        return Ok(LogTailOut { paused: true, ui: None, daemon: None });
+    }
+    let logs = state.logs.clone();
+    let daemon = logs.daemon_tail(&daemon_addr(), cursor.daemon_epoch, cursor.daemon_from).await;
+    Ok(LogTailOut {
+        paused: false,
+        ui: Some(logs.ring.tail(logs.ring.epoch(), cursor.ui_from)),
+        daemon: Some(daemon),
+    })
+}
+
+/// 前端离开日志页：断开守护进程日志连接（对端任务随之结束），恢复自动收起。
+#[tauri::command]
+async fn log_close(state: State<'_, AppState>) -> Result<(), String> {
+    LOG_VIEW_OPEN.store(false, Ordering::Relaxed);
+    *state.logs.link.lock().await = None;
+    Ok(())
+}
+
 // ---------- OS 凭据管理器（记住密码） ----------
 //
 // 键设计（两级）：
@@ -629,6 +792,9 @@ async fn password_delete(profile_id: String, host: String) -> Result<(), String>
 #[tauri::command]
 fn set_autohide(enabled: bool) {
     AUTO_HIDE.store(enabled, Ordering::Relaxed);
+    // 前端每次启动都会调到这里：新启动的前端不在日志页。顺带复位，免得前端在
+    // 日志页打开时重载/崩溃后 LOG_VIEW_OPEN 永远为真、自动收起再也不触发。
+    LOG_VIEW_OPEN.store(false, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -672,9 +838,10 @@ fn set_tray_texts(
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // 日志两个去向：stdout（RUST_LOG 控制）+ 进程内环形缓冲（「日志」页按需读取）。
+    // 环形缓冲必须赶在任何 tracing 调用之前装好，才称得上「自启动以来」。
+    let log_ring = Arc::new(LogRing::new());
+    mp_ipc::log::init(log_ring.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -693,9 +860,11 @@ fn main() {
             set_autohide,
             ui_hide_window,
             set_tray_texts,
+            log_tail,
+            log_close,
             ui_spawn_daemon
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
             // 托盘：三态图标 + 菜单（状态行禁用项 / 显示窗口 / 连接 / 断开 / 退出）
@@ -762,6 +931,10 @@ fn main() {
                 })),
                 last_state: Mutex::new("disconnected".into()),
                 tray_lang: Mutex::new("zh-CN"),
+                logs: Arc::new(LogState {
+                    ring: log_ring,
+                    link: tokio::sync::Mutex::new(None),
+                }),
             });
 
             tauri::async_runtime::spawn(link_supervisor(handle));
@@ -933,5 +1106,169 @@ mod tests {
         assert!(!should_spawn_daemon(Some(Duration::from_secs(10)), 1), "首次未果未满 20s");
         assert!(should_spawn_daemon(Some(SPAWN_RETRY_AFTER), 1), "二次拉起");
         assert!(!should_spawn_daemon(Some(Duration::from_secs(300)), 2), "配额用尽转人工");
+    }
+
+    // ---------- 日志页 ----------
+
+    fn log_state() -> LogState {
+        LogState { ring: Arc::new(LogRing::new()), link: tokio::sync::Mutex::new(None) }
+    }
+
+    /// 假守护进程日志端口的行为。
+    #[derive(Clone, Copy, Debug)]
+    enum Fake {
+        /// 同一连接上持续应答 LogTail（正常运行、版本匹配的守护进程）
+        Persist,
+        /// 每个连接只应答一个 LogTail（纪元逐连接 +1，模拟守护进程重启）后断开
+        Restart,
+        /// 连上即断
+        Drop,
+        /// 应答一个与日志无关的消息（模拟旧版本守护进程）
+        Garbage,
+    }
+
+    /// 起一个假守护进程日志端口；返回地址与它收到的 (epoch, from) 游标记录。
+    async fn spawn_fake_log_daemon(mode: Fake) -> (String, Arc<StdMutex<Vec<(u64, u64)>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            let mut epoch = 1000;
+            while let Ok((stream, _)) = listener.accept().await {
+                if matches!(mode, Fake::Drop) {
+                    continue;
+                }
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let (rd, mut wr) = tokio::io::split(stream);
+                    let mut rd = BufReader::new(rd);
+                    let resp = match mode {
+                        Fake::Persist | Fake::Restart => {
+                            Response::LogTail(LogBatch { epoch, next: 1, dropped: 0, lines: vec![] })
+                        }
+                        _ => Response::Ok,
+                    };
+                    loop {
+                        let Ok(Request::LogTail { epoch: e, from }) = recv_request(&mut rd).await
+                        else {
+                            return;
+                        };
+                        log.lock().unwrap().push((e, from));
+                        let keep = matches!(mode, Fake::Persist);
+                        if mp_ipc::codec::send_response(&resp, &mut wr).await.is_err() || !keep {
+                            return;
+                        }
+                    }
+                });
+                epoch += 1;
+            }
+        });
+        (addr, seen)
+    }
+
+    /// 连不上守护进程：如实报告 Offline（而不是含糊的「无响应」）。
+    #[tokio::test]
+    async fn log_tail_reports_offline_when_daemon_is_down() {
+        // 绑定后立刻释放：拿到一个此刻必然无人监听的端口
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let st = log_state();
+        assert!(matches!(st.daemon_tail(&addr, 0, 0).await, DaemonLog::Offline));
+        assert!(st.link.lock().await.is_none());
+    }
+
+    /// 正常往返：连接建立后保留复用，游标 (epoch, from) 原样透传。
+    #[tokio::test]
+    async fn log_tail_passes_cursor_through_and_reuses_connection() {
+        let (addr, seen) = spawn_fake_log_daemon(Fake::Persist).await;
+        let st = log_state();
+        let DaemonLog::Online(first) = st.daemon_tail(&addr, 0, 0).await else {
+            panic!("守护进程在监听，应在线");
+        };
+        assert_eq!(first.epoch, 1000);
+        let DaemonLog::Online(second) = st.daemon_tail(&addr, 7, 3).await else {
+            panic!("第二轮仍应在线");
+        };
+        assert_eq!(second.epoch, 1000, "同一连接：假守护进程没见到第二个连接");
+        assert_eq!(*seen.lock().unwrap(), vec![(0, 0), (7, 3)]);
+    }
+
+    /// 守护进程重启（旧连接已死、新进程在监听）：同一轮内重连并拿到新纪元，
+    /// 不给前端闪一下「无响应」。
+    #[tokio::test]
+    async fn log_tail_reconnects_within_one_poll_after_daemon_restart() {
+        let (addr, seen) = spawn_fake_log_daemon(Fake::Restart).await;
+        let st = log_state();
+        let DaemonLog::Online(first) = st.daemon_tail(&addr, 0, 0).await else {
+            panic!("应在线");
+        };
+        // 假守护进程应答后即断开：本轮发现连接已死 → 丢弃 → 重连一次成功
+        let DaemonLog::Online(second) = st.daemon_tail(&addr, first.epoch, first.next).await
+        else {
+            panic!("守护进程已重启并恢复监听，重连后应在线");
+        };
+        assert_eq!(second.epoch, 1001, "拿到的是新进程的纪元");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(0, 0), (1000, 1)],
+            "重试仍带原游标，由新进程据纪元判定从头给"
+        );
+    }
+
+    /// 连上了却拿不到日志（旧版本守护进程不认识 log_tail / 应答无关消息 / 直接断开）
+    /// → Incompatible，且不留半死连接。
+    #[tokio::test]
+    async fn log_tail_reports_incompatible_daemon() {
+        for mode in [Fake::Garbage, Fake::Drop] {
+            let (addr, _seen) = spawn_fake_log_daemon(mode).await;
+            let st = log_state();
+            assert!(
+                matches!(st.daemon_tail(&addr, 0, 0).await, DaemonLog::Incompatible),
+                "{mode:?}"
+            );
+            assert!(st.link.lock().await.is_none(), "{mode:?}：失败后不留连接");
+        }
+    }
+
+    /// Rust ↔ 前端的线上形状契约（前端类型见 app/src/logs.ts 的 TailOut / DaemonLog）：
+    /// mock 驱动的前端 harness 验证不到这一层，这里把两端钉住。
+    #[test]
+    fn log_tail_wire_shape_matches_frontend_contract() {
+        // 前端回传的游标：snake_case 字段名原样对应；首次调用不带游标也要能解析
+        let cursor: LogCursor =
+            serde_json::from_value(serde_json::json!({ "ui_from": 3, "daemon_epoch": 7, "daemon_from": 9 }))
+                .unwrap();
+        assert_eq!((cursor.ui_from, cursor.daemon_epoch, cursor.daemon_from), (3, 7, 9));
+        assert_eq!(LogCursor::default(), serde_json::from_value(serde_json::json!({})).unwrap());
+
+        // 窗口不可见：只有 paused，前端据此保持原样
+        let out = serde_json::to_value(LogTailOut { paused: true, ui: None, daemon: None }).unwrap();
+        assert_eq!(out, serde_json::json!({ "paused": true, "ui": null, "daemon": null }));
+
+        // 三种守护进程状态都以 state 作判别字段；在线时批次字段与 state 平铺
+        let json = |d: DaemonLog| serde_json::to_value(d).unwrap();
+        let online = json(DaemonLog::Online(LogBatch { epoch: 7, next: 10, dropped: 2, lines: vec![] }));
+        assert_eq!(
+            online,
+            serde_json::json!({ "state": "online", "epoch": 7, "next": 10, "dropped": 2, "lines": [] })
+        );
+        assert_eq!(json(DaemonLog::Offline), serde_json::json!({ "state": "offline" }));
+        assert_eq!(json(DaemonLog::Incompatible), serde_json::json!({ "state": "incompatible" }));
+    }
+
+    #[test]
+    fn autohide_is_suspended_while_log_view_is_open() {
+        AUTO_HIDE.store(true, Ordering::Relaxed);
+        LOG_VIEW_OPEN.store(false, Ordering::Relaxed);
+        assert!(autohide_allowed(), "默认：连接后自动收起");
+        LOG_VIEW_OPEN.store(true, Ordering::Relaxed);
+        assert!(!autohide_allowed(), "日志页打开：用户在看，不收起");
+        LOG_VIEW_OPEN.store(false, Ordering::Relaxed);
+        AUTO_HIDE.store(false, Ordering::Relaxed);
+        assert!(!autohide_allowed(), "偏好关闭：始终不收起");
+        // 复位全局状态，避免影响并行/后续测试
+        AUTO_HIDE.store(true, Ordering::Relaxed);
     }
 }

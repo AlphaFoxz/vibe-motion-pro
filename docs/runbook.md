@@ -10,7 +10,7 @@
 | 特有前置 | wintun.dll | 无 |
 | 开发期起 daemon | 管理员 PowerShell `cargo run -p mp-daemon`；或构建过一次后由 UI 首次连接时自动 UAC 拉起（见 `app/src-tauri/src/main.rs` `ui_spawn_daemon`） | 手动 `cargo run -p mp-daemon`（TUN 降级）；或装 dev systemd 服务（§2.2） |
 | 用户安装 | NSIS：装完首连弹一次 UAC，sidecar 自动落位 | deb：内置 systemd unit，装完服务自启（plan-release.md P2） |
-| daemon 日志 | stdout + tracing | 服务 `journalctl -u mp-daemon-dev`；手跑同 Windows |
+| daemon 日志 | UI「日志」Tab（自启动以来的 INFO+ 历史，可复制）；sidecar 的 stdout 不可见 | UI「日志」Tab；或服务 `journalctl -u mp-daemon-dev`；手跑同 Windows |
 
 UI 两平台完全一致：`cd app && pnpm tauri dev`，连接流程见 §3。
 无特权（daemon 无管理员/root）时 TUN 自动降级：可登录、握手验证，但无系统级转发。
@@ -101,7 +101,7 @@ UI 填：服务器 `vpn.example.com`（或公司给的门户域名）、工号�
 | 「登录被拒绝」 | 工号/密码/动态密保错（密保每分钟变，注意时效） |
 | 连接成功但无网络 | 日志看 TUN 是否降级（Windows：管理员？wintun.dll？Linux：daemon 是否 root？）；'U' 是否下发 virip（没下发则不动路由） |
 | 状态一直 connected 但实际断流 | keepalive 30s×3 后判死自动回 disconnected（≤3s 可见），重连即可 |
-| daemon 日志 | Windows：stdout + tracing；Linux 服务：`journalctl -u mp-daemon-dev`；手跑：stdout。`RUST_LOG=debug` 看协议细节 |
+| daemon 日志 | 任何平台：UI 底部「日志」Tab（自启动以来，默认 INFO+，设了 `RUST_LOG` 则与之同级，可复制后发给支持人员）。Windows：stdout + tracing；Linux 服务：`journalctl -u mp-daemon-dev`；手跑：stdout。`RUST_LOG=debug` 看协议细节 |
 | Linux UI 一直离线 | `ss -ltn \| grep 62000` 看 daemon 是否在听；服务模式 `systemctl status mp-daemon-dev`；确认没有旧进程占端口 |
 
 ## 5. 已知限制（当前版本）

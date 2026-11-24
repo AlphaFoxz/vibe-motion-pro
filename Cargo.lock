@@ -2433,7 +2433,6 @@ dependencies = [
  "tauri-plugin-notification",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "windows-sys 0.52.0",
 ]
 
@@ -2484,6 +2483,8 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
