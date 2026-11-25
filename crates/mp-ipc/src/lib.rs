@@ -49,6 +49,10 @@ pub enum Request {
     /// 永不触碰守护进程的状态锁；作为连接的**首个请求**时，该连接成为
     /// 专门的日志连接（见 `mp_daemon::handle_client`）。
     LogTail { epoch: u64, from: u64 },
+    /// 优雅退出 daemon（plan-auto-update.md P1：更新安装前让 sidecar 先退，
+    /// 防止 exe 被占用导致更新半途失败）。仅 managed 模式响应——systemd
+    /// 服务的生命周期归系统管，IPC 不得停掉系统服务。
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

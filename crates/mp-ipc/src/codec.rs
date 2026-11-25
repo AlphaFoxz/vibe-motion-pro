@@ -71,6 +71,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_request_roundtrip() {
+        let (mut a, mut b) = duplex_pair().await;
+        send_request(&Request::Shutdown, &mut a).await.unwrap();
+        assert_eq!(recv_request(&mut b).await.unwrap(), Request::Shutdown);
+    }
+
+    #[tokio::test]
     async fn response_roundtrip() {
         let (mut a, mut b) = duplex_pair().await;
         let res = Response::Status {

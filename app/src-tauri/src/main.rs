@@ -517,6 +517,40 @@ async fn vpn_stop(state: State<'_, AppState>) -> Result<StatusSnapshot, String> 
     }
 }
 
+/// 更新安装前置（plan-auto-update.md P1）：让 managed daemon 优雅退出并
+/// 确认进程已退——sidecar exe 被占用会让更新安装半途失败（旧 UI 已退出、
+/// 覆盖不完整，用户手里没有可用应用）。
+/// 链路已断 = daemon 不在跑或已退出，跳过请求直接确认；发请求后轮询
+/// 62000 拒连（listen socket 随进程退出由内核回收），拒连后再留 1s 收尾
+/// 宽限；上限 15s（teardown 含网关 logout，可能秒级）。
+#[tauri::command]
+async fn daemon_shutdown(state: State<'_, AppState>) -> Result<(), String> {
+    let link_alive = state.link.write.lock().await.is_some();
+    if link_alive {
+        match state.link.send(Request::Shutdown).await {
+            Ok(Response::Ok) => {}
+            // 非 managed（systemd）拒绝：真实错误，上抛（前端更新流程中止）
+            Ok(Response::Error { message }) => return Err(message),
+            Ok(_) => return Err("守护进程返回了意外的应答".into()),
+            // 发送层失败：daemon 可能恰在退出（连接刚断），落到下方端口
+            // 轮询兜底——仍在跑则 15s 超时报错，已退则端口拒连成功
+            Err(e) => tracing::warn!("shutdown 请求发送失败：{e}（继续按端口轮询确认）"),
+        }
+    }
+    let addr = daemon_addr();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if tcp_connect(&addr).await.is_err() {
+            tokio::time::sleep(Duration::from_secs(1)).await; // 进程收尾宽限
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("守护进程未在 15 秒内退出，已中止更新安装".into());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 #[tauri::command]
 async fn vpn_session(state: State<'_, AppState>) -> Result<SessionInfo, String> {
     match state.link.send(Request::GetSession).await? {
@@ -850,6 +884,7 @@ fn main() {
             vpn_connect,
             vpn_start,
             vpn_stop,
+            daemon_shutdown,
             vpn_session,
             profile_list,
             profile_add,

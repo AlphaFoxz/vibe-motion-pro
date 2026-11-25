@@ -164,7 +164,13 @@ async fn main() -> anyhow::Result<()> {
     // （2026-11 真机踩坑：handle_conn 内联 await 时 ticker 分支 15s 不被轮询，
     //   冻结看门狗误判自杀）；连接内另有独立心跳分支，认证期间（锁被长时间持有）
     //   FREEZE_TICK 仍每秒前进，看门狗不会误杀。
-    let state = Arc::new(Mutex::new(DaemonState::new(store)));
+    // Shutdown IPC 装配（plan-auto-update.md P1）：managed 标志决定请求是否
+    // 受理；watch 信号由 handle_request 置位、主循环 select 感知后走 teardown
+    let mut ds = DaemonState::new(store);
+    ds.managed = args.managed;
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    ds.shutdown_tx = Some(shutdown_tx);
+    let state = Arc::new(Mutex::new(ds));
     let server = {
         // 绑定失败重试而非立即退出：本机其他服务偶发抢占端口（如开发工具的
         // live-daemon 抢过 62000），重试窗口内常可恢复；耗尽后带指引退出。
@@ -259,6 +265,15 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     parent_dead_since.or_else(|| Some(Instant::now()))
                 };
+            }
+            _ = shutdown_rx.changed() => {
+                // Shutdown IPC（UI 更新安装前置）：与父进程死亡共用
+                // managed_shutdown 的优雅退出路径（teardown 后进程退出，
+                // 调用方据端口拒连确认「exe 已不被占用」）
+                if *shutdown_rx.borrow() {
+                    tracing::info!("shutdown: 收到 IPC 优雅退出请求，teardown 后退出");
+                    return managed_shutdown(state).await;
+                }
             }
         }
     }

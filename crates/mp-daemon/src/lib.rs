@@ -447,6 +447,12 @@ pub struct DaemonState {
     /// 最近一次会话的（AG 主机, Cookie）——teardown 时发 logout 释放服务端会话
     /// （反复重登不注销会在网关堆僵尸隧道，真机实测后续会话被立即拒转）
     pub last_session: Option<(String, String)>,
+    /// 是否由 UI 进程托管（`--managed` sidecar）：Shutdown 请求仅在
+    /// managed 模式响应（系统服务生命周期归 systemd）。
+    pub managed: bool,
+    /// 优雅退出信号（main.rs 装配）：handle_request 置位，主循环 select
+    /// 感知后统一走 managed_shutdown。测试/非完整装配时为 None。
+    pub shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl DaemonState {
@@ -459,6 +465,8 @@ impl DaemonState {
             active_tunnel: None,
             active_tun: None,
             last_session: None,
+            managed: false,
+            shutdown_tx: None,
         }
     }
 
@@ -597,6 +605,24 @@ pub fn handle_request(state: &mut DaemonState, req: &Request) -> Response {
             },
             Err(e) => Response::Error { message: e.to_string() },
         },
+        Request::Shutdown => {
+            // 优雅退出（仅 managed：非 managed 是系统服务，生命周期归
+            // systemd，防本机任意进程经 IPC 停服务）。置位 watch 后由主循环
+            // 统一走 managed_shutdown（注销会话 → 回滚路由/DNS → 停泵 → 退出），
+            // 进程退出时端口随内核回收，调用方据此确认「文件已不被占用」。
+            if !state.managed {
+                return Response::Error {
+                    message: "shutdown 仅 managed 模式支持（系统服务请用 systemctl stop）".into(),
+                };
+            }
+            match &state.shutdown_tx {
+                Some(tx) => {
+                    let _ = tx.send(true);
+                    Response::Ok
+                }
+                None => Response::Error { message: "shutdown 通道未装配".into() },
+            }
+        }
     }
 }
 
@@ -790,6 +816,22 @@ mod tests {
         let mut s = DaemonState::new(ProfileStore::new());
         let _ = s.profiles.add_or_update(Profile::new("prof1", "Office", "vpn.example.com"));
         s
+    }
+
+    #[test]
+    fn shutdown_guards_and_signal() {
+        // 非 managed（systemd 等系统服务形态）：拒绝，防 IPC 停掉系统服务
+        let mut st = state();
+        match handle_request(&mut st, &Request::Shutdown) {
+            Response::Error { .. } => {}
+            other => panic!("非 managed 应拒绝 Shutdown：{other:?}"),
+        }
+        // managed + 装配 watch：应答 Ok 且退出信号置位（主循环据此走 teardown）
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        st.managed = true;
+        st.shutdown_tx = Some(tx);
+        assert!(matches!(handle_request(&mut st, &Request::Shutdown), Response::Ok));
+        assert!(*rx.borrow());
     }
 
     #[tokio::test]
