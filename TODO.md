@@ -101,9 +101,10 @@
       Windows=NSIS 内置 sidecar（UAC 提权拉起，随 UI 存亡）+ Linux=deb 注入 systemd unit
       （dpkg-deb 后处理，WSL 真机全链路验证：安装/服务/IPC/重启自启/干净卸载）；
       macOS launchd 暂缓；UAC 真机端到端与首次 tag 发布留人工验收项
-- [ ] 应用自更新 —— **规划完成，待实施（2026-11-22，见 `docs/plan-auto-update.md`）**：
+- [ ] 应用自更新 —— **P0-P4 已实施（2026-11-26，见 `docs/plan-auto-update.md`）**：
       Windows=应用内更新（Tauri updater，GitHub Releases 为源；install 前经 Shutdown IPC
-      让 sidecar daemon 先退，防文件占用）+ Linux=检查更新引导下载（deb 走 dpkg/apt）
+      让 sidecar daemon 先退，防文件占用）+ Linux=检查更新引导下载（deb 走 dpkg/apt）；
+      待维护者配置签名 Secrets 后随 0.2.0 首发，端到端验证留人工项
 - [ ] wintun.dll 补 arm64 变体
 
 ### 阶段5 验证发布

@@ -17,6 +17,16 @@
       </header>
 
       <div id="offline-banner" class="banner warn hidden"></div>
+      <!-- 应用内更新横幅（plan-auto-update.md P2/P4）：提示态 / 进度态 / 错误态共用 -->
+      <div id="update-banner" class="banner info hidden">
+        <span id="update-text" class="update-text"></span>
+        <button id="update-action" class="btn mini hidden"></button>
+        <button id="update-dismiss" class="btn ghost mini hidden" aria-label="dismiss">×</button>
+        <div id="update-progress" class="update-progress hidden">
+          <div class="update-progress-track"><div id="update-progress-fill"></div></div>
+          <span id="update-progress-label"></span>
+        </div>
+      </div>
 
       <main>
         <!-- 连接视图 -->

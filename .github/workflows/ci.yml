@@ -71,13 +71,16 @@ jobs:
         working-directory: app
         run: |
           pnpm install --registry=https://registry.npmjs.org
-          pnpm tauri build --bundles nsis
+          # 冒烟构建不带签名私钥：关掉 updater 产物（开启 createUpdaterArtifacts
+          # 时缺 TAURI_SIGNING_PRIVATE_KEY 会直接构建失败——plan-auto-update.md P0）
+          pnpm tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - name: bundle (linux)
         if: runner.os == 'Linux'
         working-directory: app
         run: |
           pnpm install --registry=https://registry.npmjs.org
-          pnpm tauri build --bundles deb,appimage
+          # Linux（deb+appimage）不做应用内更新：关闭 updater 产物
+          pnpm tauri build --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
       # macOS 暂缓（当前只发 win/linux）。恢复时取消注释、矩阵加回 macos-latest，
       # 并在 upload 的 path 里补回 dmg/*.dmg 与 macos/*.app 两行：
       # - name: bundle (macos)

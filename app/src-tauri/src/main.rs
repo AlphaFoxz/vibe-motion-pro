@@ -99,6 +99,7 @@ struct TrayUi {
     show_item: MenuItem<tauri::Wry>,
     connect_item: MenuItem<tauri::Wry>,
     disconnect_item: MenuItem<tauri::Wry>,
+    check_update_item: MenuItem<tauri::Wry>,
     quit_item: MenuItem<tauri::Wry>,
 }
 
@@ -551,6 +552,76 @@ async fn daemon_shutdown(state: State<'_, AppState>) -> Result<(), String> {
     }
 }
 
+/// Linux（deb）：检查 Release 更新清单并比对版本（plan-auto-update.md P4）。
+/// 不走 updater 插件的 `check()`（其 Linux 路径要求 AppImage 环境）；
+/// 本命令只做提示——安装由用户下载 deb 走 dpkg/apt，Windows 的下载与
+/// 签名校验仍由 updater 插件负责。失败上抛（前端自动检查时静默）。
+#[derive(serde::Deserialize)]
+struct UpdateManifest {
+    version: String,
+}
+
+#[derive(serde::Serialize)]
+struct LatestVersion {
+    has_update: bool,
+    version: String,
+}
+
+/// updater endpoint（tauri.conf.json plugins.updater.endpoints[0]），替换
+/// `{{target}}/{{arch}}/{{current_version}}` 占位符。单一来源：与 updater
+/// 插件的检查共用同一 URL。
+fn updater_endpoint(app: &AppHandle) -> String {
+    const DEFAULT: &str =
+        "https://github.com/AlphaFoxz/vibe-motion-pro/releases/latest/download/latest.json";
+    let url = app
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|u| u.get("endpoints"))
+        .and_then(|e| e.as_array())
+        .and_then(|a| a.first())
+        .and_then(|s| s.as_str())
+        .unwrap_or(DEFAULT)
+        .to_string();
+    url.replace("{{target}}", std::env::consts::OS)
+        .replace("{{arch}}", std::env::consts::ARCH)
+        .replace("{{current_version}}", &app.package_info().version.to_string())
+}
+
+#[tauri::command]
+async fn check_latest_version(app: AppHandle) -> Result<LatestVersion, String> {
+    let endpoint = updater_endpoint(&app);
+    let cur = app.package_info().version.clone();
+    let manifest = tokio::task::spawn_blocking(move || -> Result<UpdateManifest, String> {
+        // ureq 为阻塞客户端（rustls），放 blocking 线程池；10s 超时避免
+        // GitHub 不可达时把前端 await 挂死
+        let body = ureq::get(&endpoint)
+            .timeout(Duration::from_secs(10))
+            .call()
+            .map_err(|e| e.to_string())?
+            .into_string()
+            .map_err(|e| e.to_string())?;
+        serde_json::from_str(&body).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    // 清单版本非法时按「无更新」处理（防手写清单笔误弹错误打扰用户）
+    let has_update = semver::Version::parse(&manifest.version)
+        .map(|remote| remote > cur)
+        .unwrap_or(false);
+    Ok(LatestVersion { has_update, version: manifest.version })
+}
+
+/// Linux：打开 GitHub Release 下载页（引导升级；实际安装走 dpkg/apt）。
+#[tauri::command]
+async fn open_release_page(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url("https://github.com/AlphaFoxz/vibe-motion-pro/releases/latest", None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn vpn_session(state: State<'_, AppState>) -> Result<SessionInfo, String> {
     match state.link.send(Request::GetSession).await? {
@@ -848,6 +919,7 @@ fn set_tray_texts(
     connect: String,
     disconnect: String,
     quit: String,
+    check_update: String,
 ) -> Result<(), String> {
     let recognized = match lang.as_str() {
         "en" => "en",
@@ -858,6 +930,7 @@ fn set_tray_texts(
     if let Ok(guard) = state.tray.lock() {
         if let Some(ui) = guard.as_ref() {
             ui.show_item.set_text(show.as_str()).map_err(|e| e.to_string())?;
+            ui.check_update_item.set_text(check_update.as_str()).map_err(|e| e.to_string())?;
             ui.connect_item.set_text(connect.as_str()).map_err(|e| e.to_string())?;
             ui.disconnect_item.set_text(disconnect.as_str()).map_err(|e| e.to_string())?;
             ui.quit_item.set_text(quit.as_str()).map_err(|e| e.to_string())?;
@@ -879,12 +952,16 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             vpn_status,
             vpn_connect,
             vpn_start,
             vpn_stop,
             daemon_shutdown,
+            check_latest_version,
+            open_release_page,
             vpn_session,
             profile_list,
             profile_add,
@@ -910,11 +987,13 @@ fn main() {
             let disconnect_item =
                 MenuItem::with_id(&handle, "tray-disconnect", "断开", false, None::<&str>)?;
             let quit_item = MenuItem::with_id(&handle, "quit", "退出", true, None::<&str>)?;
+            let check_update_item =
+                MenuItem::with_id(&handle, "tray-check-update", "检查更新…", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(&handle)?;
             let sep2 = PredefinedMenuItem::separator(&handle)?;
             let menu = Menu::with_items(
                 &handle,
-                &[&status_item, &sep1, &show_item, &connect_item, &disconnect_item, &sep2, &quit_item],
+                &[&status_item, &sep1, &show_item, &connect_item, &disconnect_item, &sep2, &check_update_item, &quit_item],
             )?;
 
             let tray = TrayIconBuilder::with_id("mp-tray")
@@ -940,6 +1019,12 @@ fn main() {
                         }
                     });
                 }
+                // 更新检查在前端执行（updater 插件/横幅 UI 都在前端），托盘
+                // 只负责唤起主界面并触发检查（结果经横幅/错误条展示）
+                "tray-check-update" => {
+                    show_main(app);
+                    let _ = app.emit("tray-check-update", ());
+                }
                 "quit" => app.exit(0),
                 _ => {}
             });
@@ -961,6 +1046,7 @@ fn main() {
                     status_item,
                     connect_item,
                     disconnect_item,
+                    check_update_item,
                     show_item,
                     quit_item,
                 })),

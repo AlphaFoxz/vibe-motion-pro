@@ -28,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": {
       "sidecar/mp-daemon.exe": "mp-daemon.exe",
       "sidecar/wintun.dll": "wintun.dll"
@@ -40,5 +41,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUzMUJCMEZDMTJCODQ4N0MKUldSOFNMZ1MvTEFiNDdhWEZMRWhpWGR0OXN2SDA2WURNdGlQNXJWcEsyMFhoeVR2M3Y4YW9OTS8K",
+      "endpoints": [
+        "https://github.com/AlphaFoxz/vibe-motion-pro/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

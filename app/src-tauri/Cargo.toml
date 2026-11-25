@@ -10,6 +10,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-notification = "2"
+# 应用内自更新（plan-auto-update.md）；pubkey 对应私钥由维护者离线保管
+tauri-plugin-updater = "2"
+# Linux 检查更新引导：打开 Release 下载页（plan-auto-update.md P4）
+tauri-plugin-opener = "2"
+# Linux(deb) 版本检查：拉取 latest.json 并做 semver 比较（updater 插件的
+# check 在 Linux 上要求 AppImage 环境，deb 走此轻量通道）
+ureq = { version = "2", default-features = false, features = ["tls"] }
+semver = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

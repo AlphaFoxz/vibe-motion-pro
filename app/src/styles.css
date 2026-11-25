@@ -182,6 +182,22 @@ main::-webkit-scrollbar { display: none; }
 .banner.info { background: color-mix(in srgb, var(--blue) 12%, var(--panel)); border: 1px solid color-mix(in srgb, var(--blue) 40%, transparent); }
 .hidden { display: none !important; }
 
+/* ---------- 更新横幅（plan-auto-update.md P2）---------- */
+#update-banner { flex-wrap: wrap; }
+.update-text { flex: 1; min-width: 0; white-space: pre-line; }
+.btn.mini { padding: 3px 10px; font-size: 11.5px; flex: none; }
+.update-progress { width: 100%; display: flex; align-items: center; gap: 8px; }
+.update-progress-track {
+  flex: 1; height: 4px; border-radius: 2px; overflow: hidden;
+  background: color-mix(in srgb, var(--blue) 18%, var(--panel));
+}
+#update-progress-fill {
+  height: 100%; width: 0%; border-radius: 2px;
+  background: var(--blue);
+  transition: width 0.15s;
+}
+#update-progress-label { font-size: 11px; color: var(--text-dim); flex: none; }
+
 /* ---------- 表单 ---------- */
 #conn-form { margin-top: 4px; }
 #fields.collapsed { display: none; }

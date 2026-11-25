@@ -1,8 +1,12 @@
 # plan-auto-update：应用自更新（Windows 应用内更新 / Linux 检查引导）
 
-> 状态：**规划完成，待实施**（2026-11-22）。对齐已落地的发布架构
-> （[plan-release.md](plan-release.md)：win=sidecar UAC / linux=deb+systemd），
-> 取代早期的 updater 骨架草案。
+> 状态：**P0-P4 实施完成（2026-11-26），P5 端到端验证待发布流程**。
+> 对齐已落地的发布架构（[plan-release.md](plan-release.md)：win=sidecar UAC /
+> linux=deb+systemd），取代早期的 updater 骨架草案。
+> **发布前置（维护者待办）**：GitHub Secrets 配置
+> `TAURI_SIGNING_PRIVATE_KEY`（`~/.tauri/vibemotionpro.key` 内容）与
+> `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（`~/.tauri/vibemotionpro.key.password`
+> 内容），并将两文件离线备份（私钥丢失 = 存量客户端永久收不到更新）。
 
 ## 背景
 
@@ -62,13 +66,15 @@ Linux(deb)：同一横幅，按钮为「前往下载」→ 打开 GitHub Release
 
 ## P0 密钥与插件接入
 
-- [ ] 生成签名密钥：`pnpm tauri signer generate -w ~/.tauri/vibemotionpro.key`（设密码）。
-      公钥写入 `tauri.conf.json`；**私钥文件 + 密码离线备份**（密码管理器）
+- [x] 生成签名密钥：`pnpm tauri signer generate -w ~/.tauri/vibemotionpro.key`（设密码）。
+      公钥已写入 `tauri.conf.json`；**私钥文件 + 密码离线备份待维护者完成**
+      （`~/.tauri/vibemotionpro.key{,.password}`，权限 600）
 - [ ] GitHub Secrets：`TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-- [ ] 引入插件：`pnpm tauri add updater`（Rust `tauri-plugin-updater` +
-      JS `@tauri-apps/plugin-updater`），builder 注册
-      `.plugin(tauri_plugin_updater::Builder::new().build())`
-- [ ] `tauri.conf.json`：
+      （**维护者待办**；缺失时 Release CI 的 prepare 阶段会明确拦截）
+- [x] 引入插件：`tauri-plugin-updater`（Rust）+ `@tauri-apps/plugin-updater`（JS），
+      builder 注册 `.plugin(tauri_plugin_updater::Builder::new().build())`
+- [x] `tauri.conf.json`：`createUpdaterArtifacts: true` + `plugins.updater`
+      （pubkey / endpoints / `windows.installMode: "passive"`）
 
 ```jsonc
 {
@@ -85,38 +91,43 @@ Linux(deb)：同一横幅，按钮为「前往下载」→ 打开 GitHub Release
 }
 ```
 
-- [ ] capabilities 加 `updater:default`（check / download / install / download-and-install）
-- [ ] `ci.yml` bundle job（双平台）与 README/runbook 的本地构建说明：无密钥构建加
-      `--config '{"bundle":{"createUpdaterArtifacts":false}}'`（约束 #8）
+- [x] capabilities 加 `updater:default`（check / download / install / download-and-install）
+- [x] `ci.yml` bundle job（双平台）加
+      `--config '{"bundle":{"createUpdaterArtifacts":false}}'`（约束 #8）；
+      本地构建同参数（已实测 deb 构建通过）
 
 ## P1 daemon 优雅退出（Shutdown IPC）
 
-更新安装的前置条件（约束 #2），也是本计划风险最高的环节。
+更新安装的前置条件（约束 #2），也是本计划风险最高的环节。**已完成
+（commit `feat(updater): P1 daemon 优雅退出`）**。
 
-- [ ] `mp-ipc`：`Request::Shutdown`
-- [ ] `mp-daemon`：**仅 managed 模式响应**——置退出标志，走既有清理路径
+- [x] `mp-ipc`：`Request::Shutdown`
+- [x] `mp-daemon`：**仅 managed 模式响应**——置退出标志，走既有清理路径
       （隧道关闭 / 路由与 DNS 回滚）后 `exit(0)`；非 managed 返回 `Error`
       （防止被用来停掉 Linux 的 systemd 服务）
-- [ ] `mp-app` 命令 `daemon_shutdown()`：发请求 → 等 62000 释放（上限 10s）→ `Ok` / `Err`
-- [ ] 测试：IPC 往返、非 managed 拒绝、managed 退出路径复用既有清理
+- [x] `mp-app` 命令 `daemon_shutdown()`：发请求 → 等 62000 释放 + 1s 收尾宽限
+      （上限 15s，teardown 含网关 logout）→ `Ok` / `Err`
+- [x] 测试：IPC 往返、非 managed 拒绝、managed 退出路径复用既有清理
 
 ## P2 Windows 更新 UI 流程
 
-- [ ] 顶部横幅 `update-banner`（非模态，info 风格）：「发现新版本 vY」+ 按钮 + 关闭
-- [ ] 触发：启动后延迟 8s（避开启动期的 UAC 拉起与首连），之后每 4h 一次；失败一律静默
-- [ ] 托盘菜单加「检查更新…」：有更新 → 显示主窗口 + 横幅；已最新 → 通知「已是最新版本」
-- [ ] 连接态点击更新 → 二次确认「更新将断开 VPN 连接，完成后需重新连接」
-- [ ] **必须分步**：`update.download(onEvent)`（横幅内进度条）→ `daemon_shutdown` 成功
-      → `update.install(path)`。禁止使用一步式 `downloadAndInstall`
-- [ ] 失败恢复：下载失败 / 签名校验失败 / daemon 未退出 → 横幅报错并可重试，应用保持可用
-- [ ] 关闭横幅后本次会话不再提示；下次启动仍检查（不做「跳过此版本」）
-- [ ] i18n 三语言文案
+- [x] 顶部横幅 `update-banner`（非模态，info 风格）：「发现新版本 vY」+ 按钮 + 关闭
+- [x] 触发：启动后延迟 8s（避开启动期的 UAC 拉起与首连），之后每 4h 一次；失败一律静默
+- [x] 托盘菜单加「检查更新…」：有更新 → 显示主窗口 + 横幅；已最新 → 错误条提示；
+      语言切换经 `set_tray_texts` 同步文案
+- [x] 连接态点击更新 → 二次确认「更新将断开 VPN 连接，完成后需重新连接」
+- [x] **必须分步**：`update.download(onEvent)`（横幅内进度条）→ `daemon_shutdown` 成功
+      → `update.install()`（插件 2.14 API：download/install 均无路径参数，
+      内部记录下载状态）
+- [x] 失败恢复：下载失败 / 签名校验失败 / daemon 未退出 → 横幅报错并可重试，应用保持可用
+- [x] 关闭横幅后本次会话不再提示该版本；下次启动仍检查（不做「跳过此版本」）
+- [x] i18n 三语言文案
 
 ## P3 CI：签名构建 + latest.json
 
-- [ ] `release.yml` build(windows)：注入两个签名 env；artifact 增加 `*.sig`
-- [ ] `scripts/gen-latest-json.mjs`（Node ESM，沿用现有脚本风格）：输入 `.sig` +
-      `release-notes.md` + 版本 → 输出 `latest.json`
+- [x] `release.yml` build(windows)：注入两个签名 env；artifact 增加 `*.sig`
+- [x] `scripts/gen-latest-json.mjs`（Node ESM）：输入 `.sig` + `release-notes.md` +
+      版本（读 tauri.conf.json）→ 输出 `latest.json`（假产物冒烟通过）
 
 ```jsonc
 {
@@ -132,30 +143,37 @@ Linux(deb)：同一横幅，按钮为「前往下载」→ 打开 GitHub Release
 }
 ```
 
-- [ ] 在 release job 生成并上传（`notes` 来自该 job 产出的 `release-notes.md`）；
-      不采用 tauri-action（它会接管 Release 创建，与现有 git-cliff 流程冲突）
-- [ ] build(linux)：`--config` 关闭 updater 产物（deb 无产物，AppImage 不纳入）
-- [ ] 发布后冒烟：`curl` 校验 `latest.json` 可取、JSON 合法、`url` 可达
+- [x] 在 release job 生成并上传（`notes` 来自该 job 产出的 `release-notes.md`）；
+      不采用 tauri-action（它会接管 Release 创建，与现有 git-cliff 流程冲突）。
+      prepare 阶段新增「签名 Secrets 必须已配置」拦截（缺失时提前失败而非
+      十几分钟后在 bundle 步骤模糊报错）
+- [x] build(linux)：`--config` 关闭 updater 产物（deb 无产物，AppImage 不纳入）
+- [x] 发布前冒烟：release job 里校验 `latest.json` JSON 合法、`url` 指向的产物存在
+      （发布后 `curl` 冒烟并入 P5 人工项）
 - [ ] Windows updater 产物形态（`setup.exe` + `.sig`）以 CI 实际产出为准，上传用 glob 匹配
 
 ## P4 Linux：检查更新 + 引导下载
 
-- [ ] Rust 命令 `check_latest_version`：GET 同一 endpoint，解析 `version` 并做 semver 比较，
-      返回 `{ version, notes?, url }`。不走 updater 的 `check()`（Linux 下要求 AppImage 环境）。
-      HTTP 客户端建议 `ureq`（rustls，阻塞调用放 `spawn_blocking`），版本比较用 `semver`
-      （tauri 已依赖，不增加编译量）。此路径只做提示，不校验签名——Windows 的安装仍由
-      updater 校验
-- [ ] 横幅按钮「前往下载」→ opener 插件打开 `https://github.com/AlphaFoxz/vibe-motion-pro/releases/latest`
+- [x] Rust 命令 `check_latest_version`：GET 同一 endpoint（tauri.conf.json 的
+      `plugins.updater.endpoints[0]`，占位符已替换），解析 `version` 并在 Rust 侧
+      semver 比较（前端字符串比较不可靠），返回 `{ has_update, version }`。
+      不走 updater 的 `check()`（Linux 下要求 AppImage 环境）。HTTP 客户端
+      `ureq`（rustls，阻塞调用放 `spawn_blocking`，10s 超时）。此路径只做提示，
+      不校验签名——Windows 的安装仍由 updater 校验
+- [x] 横幅按钮「前往下载」→ opener 插件打开
+      `https://github.com/AlphaFoxz/vibe-motion-pro/releases/latest`
+      （Rust 侧 `app.opener().open_url`，无需前端权限）
 - [ ] 可选：`deb-inject-service.sh` 的 `prerm` 按 `$1` 分支处理（升级时只 stop 不 disable，
       postinst 重新 start 到新二进制）
 
 ## P5 端到端验证与首发
 
-- [ ] 以 **0.1.4 作为首个带 updater 的版本**发布；验证 0.1.4 → 0.1.5 的升级链路
+- [ ] 以 **0.2.0 作为首个带 updater 的版本**发布（版本号已升）；存量 ≤0.1.3 用户
+      需手动安装一次 0.2.0；0.2.0 → 0.2.1 走完整应用内更新链路验证
+- [ ] 发布前置：GitHub Secrets 两个签名变量（见文档头部待办）
 - [ ] CI 全流程演练建议在 fork 仓库进行（`prepare` 要求 tag 与 `tauri.conf.json` 版本严格
       一致，无法用 `-rc` 标签在正式仓库演练）
-- [ ] 文档同步：README 平台速览表加「升级」一行；TODO.md 阶段4 索引；
-      plan-release.md 风险清单交叉引用
+- [x] 文档同步：TODO.md 阶段4 索引；README 平台速览表「升级」行
 
 ## 验证清单
 

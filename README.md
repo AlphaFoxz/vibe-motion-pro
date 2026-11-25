@@ -60,6 +60,7 @@ pnpm tauri dev                # UI 开发
 |---|---|---|---|
 | 开发期起 daemon | 构建过一次后 UI 首次连接自动 UAC 拉起；或手动 `cargo run -p mp-daemon` | 手动 `cargo run -p mp-daemon`，或 `sudo bash scripts/install-daemon-dev-service.sh` 常驻服务 | 未支持 |
 | 用户安装 | NSIS：装完首连一次 UAC，sidecar 自动落位 | deb：内置 systemd unit，装完服务自启（[plan-release.md](docs/plan-release.md) P2） | 未分发 |
+| 应用内升级 | updater 插件自动检测/下载/安装（`latest.json` 指向 GitHub Releases，安装前经 `Shutdown` IPC 让 daemon 先退，见 [plan-auto-update.md](docs/plan-auto-update.md)） | 检查更新 + 引导到 Release 页下载（deb 升级走 dpkg/apt） | — |
 | 特有依赖 | MSVC + wintun.dll | — | — |
 
 UI 在 Linux 上不会拉起 daemon（生命周期归 systemd/开发者管），连不上时 UI 静默重连。

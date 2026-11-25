@@ -8,6 +8,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { detectLang, setLang, t, LANGS, type Lang } from "./i18n";
 import { initLogs, logsClose, logsOpen, logsPoke, logsRenderStatic } from "./logs";
 import { $, esc, fmt } from "./util";
@@ -157,6 +158,7 @@ function syncTrayTexts() {
     connect: d.trayConnect,
     disconnect: d.trayDisconnect,
     quit: d.trayQuit,
+    checkUpdate: d.trayCheckUpdate,
   }).catch(() => {});
 }
 
@@ -629,10 +631,174 @@ async function bootstrapProfiles() {
   if (pick) selectProfile(pick);
 }
 
+// ---------- 应用内更新（plan-auto-update.md P2/P4）----------
+
+// Windows：updater 插件对象（check 返回，含 download/install）；Linux 走
+// check_latest_version 命令仅提示。横幅共用，按钮行为按平台分流。
+let updAvailable: Update | null = null;
+// 当前横幅提示的版本号（「×」时记入 dismissed，本会话不再自动提示）
+let updOfferedVer = "";
+let updDismissedVer = "";
+
+const updBanner = {
+  root: () => $("update-banner") as HTMLElement,
+  text: () => $("update-text") as HTMLElement,
+  action: () => $("update-action") as HTMLButtonElement,
+  dismiss: () => $("update-dismiss") as HTMLButtonElement,
+  progress: () => $("update-progress") as HTMLElement,
+  fill: () => $("update-progress-fill") as HTMLElement,
+  label: () => $("update-progress-label") as HTMLElement,
+};
+
+const fmtMB = (n: number) => `${(n / 1024 / 1024).toFixed(1)}MB`;
+
+function hideUpdateBanner() {
+  updBanner.root().classList.add("hidden");
+}
+
+/// 提示态横幅：新版本 + 平台对应按钮 + 关闭
+function showUpdateOffer(version: string) {
+  const d = t(lang);
+  updOfferedVer = version;
+  updAvailable = null; // Linux 无可装对象；Windows 在调用方随后赋值
+  updBanner.text().textContent = fmt(d.updateFound, version);
+  updBanner.action().textContent = isLinux ? d.updateGoDownload : d.updateAction;
+  updBanner.action().classList.remove("hidden");
+  updBanner.dismiss().classList.remove("hidden");
+  updBanner.progress().classList.add("hidden");
+  updBanner.root().classList.remove("hidden");
+}
+
+/// 进度/状态态横幅：无按钮，文本 + 可选进度条（0-100 或 null 不显示）
+function showUpdateStatus(text: string, pct: number | null, label = "") {
+  updBanner.text().textContent = text;
+  updBanner.action().classList.add("hidden");
+  updBanner.dismiss().classList.add("hidden");
+  if (pct === null) {
+    updBanner.progress().classList.add("hidden");
+  } else {
+    updBanner.fill().style.width = `${pct.toFixed(0)}%`;
+    updBanner.label().textContent = label;
+    updBanner.progress().classList.remove("hidden");
+  }
+  updBanner.root().classList.remove("hidden");
+}
+
+/// 错误态：文本 + 重试按钮
+function showUpdateError(msg: string) {
+  const d = t(lang);
+  updBanner.text().textContent = fmt(d.updateFailed, msg);
+  updBanner.action().textContent = d.updateAction;
+  updBanner.action().classList.remove("hidden");
+  updBanner.dismiss().classList.remove("hidden");
+  updBanner.progress().classList.add("hidden");
+  updBanner.root().classList.remove("hidden");
+}
+
+/**
+ * 检查更新。manual=true（托盘/手动）时对「无更新/失败」给出明确反馈；
+ * 自动检查（启动后延迟 8s + 每 4h）一律静默。发现新版本且未被用户关闭
+ * 则显示横幅。
+ */
+async function checkForUpdate(manual: boolean): Promise<void> {
+  const d = t(lang);
+  try {
+    if (isLinux) {
+      // deb：不走 updater 插件（其 Linux 路径要求 AppImage 环境），仅比对
+      // 版本并引导下载。semver 比较在 Rust 侧做（前端字符串比较不可靠）
+      const r = await invoke<{ has_update: boolean; version: string }>("check_latest_version");
+      if (r.has_update) {
+        if (r.version !== updDismissedVer) showUpdateOffer(r.version);
+        return;
+      }
+      if (manual) showError(fmt(d.updateLatest, await getVersion()));
+      return;
+    }
+    const update = await check();
+    if (update) {
+      if (update.version === updDismissedVer) return;
+      showUpdateOffer(update.version);
+      updAvailable = update;
+    } else if (manual) {
+      showError(fmt(d.updateLatest, await getVersion()));
+    }
+  } catch {
+    // 网络/GitHub 不可达：不打扰（manual 给提示）
+    if (manual) showError(d.updateCheckFailed);
+  }
+}
+
+/// Windows：执行更新。分步 download → daemon 优雅退出确认 → install：
+/// install 会强制退出应用（安装器限制），而 sidecar daemon 提权运行、
+/// 安装器无法结束它——exe 被占用会让更新半途失败，用户手里没有可用应用。
+async function startWindowsUpdate(update: Update) {
+  const d = t(lang);
+  if (["connected", "connecting", "reconnecting"].includes(status.state)) {
+    if (!window.confirm(d.updateConfirm)) return;
+  }
+  showUpdateStatus(d.updateDownloading, 0, "");
+  try {
+    let got = 0;
+    let total = 0;
+    // download 记录内部状态，install() 随后消费（2.14 API：均无路径参数）
+    await update.download((ev) => {
+      if (ev.event === "Started" && ev.data.contentLength) {
+        total = ev.data.contentLength;
+      } else if (ev.event === "Progress") {
+        got += ev.data.chunkLength;
+        showUpdateStatus(
+          d.updateDownloading,
+          total ? Math.min(100, (got / total) * 100) : null,
+          total ? `${fmtMB(got)}/${fmtMB(total)}` : fmtMB(got),
+        );
+      }
+    });
+    // 下载完成才断 VPN：让 daemon 优雅退出（失败即中止安装，应用保持可用）
+    showUpdateStatus(d.updatePreInstall, null);
+    try {
+      await invoke("daemon_shutdown");
+    } catch {
+      showUpdateError(d.updateDaemonBusy);
+      return;
+    }
+    showUpdateStatus(d.updateInstalling, null);
+    await update.install();
+    // 正常不返回：Windows 上 install 在启动安装器后强制退出应用
+  } catch (e) {
+    showUpdateError(String(e));
+  }
+}
+
+function bindUpdateUi() {
+  updBanner.action().addEventListener("click", () => {
+    if (isLinux) {
+      // deb：打开 Release 页（实际升级走 dpkg/apt）
+      void invoke("open_release_page").catch((e) => showError(String(e)));
+    } else if (updAvailable) {
+      void startWindowsUpdate(updAvailable);
+    } else {
+      // 错误态的重试：回到检查
+      hideUpdateBanner();
+      void checkForUpdate(false);
+    }
+  });
+  updBanner.dismiss().addEventListener("click", () => {
+    updDismissedVer = updOfferedVer; // 本会话不再自动提示该版本
+    hideUpdateBanner();
+  });
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   initLogs(() => lang);
   renderStatic();
   void bootstrapProfiles();
+
+  // 应用内更新（plan-auto-update.md P2）：启动 8s 后首查（避开启动期的
+  // UAC 拉起与首连），此后每 4h；自动检查失败一律静默
+  bindUpdateUi();
+  window.setTimeout(() => void checkForUpdate(false), 8000);
+  window.setInterval(() => void checkForUpdate(false), 4 * 60 * 60 * 1000);
+  void listen("tray-check-update", () => void checkForUpdate(true));
 
   // 版本号：读 tauri.conf.json（编译期入包），升版统一走 scripts/version.mjs
   getVersion().then((v) => { $("appVersion").textContent = `v${v}`; }).catch(() => {});
